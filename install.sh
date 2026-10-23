@@ -41,7 +41,7 @@ check_dependencies() {
     fi
 
     echo ""
-    echo "⚠️  Faltan dependencias necesarias del sistema: ${missing_deps[*]}"
+    echo "ADVERTENCIA: Faltan dependencias necesarias del sistema: ${missing_deps[*]}"
     echo ""
 
     # Detectar el gestor de paquetes de la distribución

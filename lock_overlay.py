@@ -70,12 +70,9 @@ class LockOverlay(QWidget):
         pill_layout.setContentsMargins(28, 22, 28, 22)
         pill_layout.setSpacing(14)
 
-        # Cabecera de la pill: Icono + Título
+        # Cabecera de la pill: Título
         header_layout = QHBoxLayout()
         header_layout.setSpacing(10)
-        
-        self.lbl_icon = QLabel("🔒")
-        self.lbl_icon.setStyleSheet("font-size: 20px; background: transparent;")
         
         self.lbl_title = QLabel("WhatsApp bloqueado")
         self.lbl_title.setStyleSheet("""
@@ -86,7 +83,6 @@ class LockOverlay(QWidget):
             letter-spacing: 0.5px;
         """)
         
-        header_layout.addWidget(self.lbl_icon)
         header_layout.addWidget(self.lbl_title)
         header_layout.addStretch()
 
@@ -122,14 +118,14 @@ class LockOverlay(QWidget):
         self.txt_pin.textChanged.connect(self._on_pin_changed)
         self.txt_pin.returnPressed.connect(self.submit_pin)
 
-        self.btn_unlock = QPushButton("➜")
-        self.btn_unlock.setFixedSize(42, 42)
+        self.btn_unlock = QPushButton("OK")
+        self.btn_unlock.setFixedSize(48, 42)
         self.btn_unlock.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_unlock.setStyleSheet("""
             QPushButton {
                 background-color: #00a884;
                 color: #ffffff;
-                font-size: 18px;
+                font-size: 14px;
                 font-weight: bold;
                 border: none;
                 border-radius: 21px;
