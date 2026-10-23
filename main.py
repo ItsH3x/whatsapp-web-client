@@ -1,5 +1,20 @@
 import sys
 import os
+
+# Optimizacion de banderas de Chromium para QtWebEngine:
+# - renderer-process-limit=1: Consolida renderers para evitar procesos duplicados
+# - disable-gpu-shader-disk-cache: Evita escrituras continuas de cache de shaders en disco
+# - max-old-space-size=384: Dispara Garbage Collection de V8 si la memoria JS supera 384 MB
+# - disable-features: Desactiva subsistemas de Chromium innecesarios para WhatsApp
+chromium_flags = [
+    "--renderer-process-limit=1",
+    "--disable-gpu-shader-disk-cache",
+    '--js-flags="--max-old-space-size=384"',
+    "--disable-features=EyeDropper,InstalledApp,WebOTP,WebPayments,WebUSB,BackgroundFetch",
+]
+existing_flags = os.environ.get("QTWEBENGINE_CHROMIUM_FLAGS", "")
+os.environ["QTWEBENGINE_CHROMIUM_FLAGS"] = f"{existing_flags} {' '.join(chromium_flags)}".strip()
+
 import json
 import tempfile
 from datetime import datetime
@@ -173,6 +188,10 @@ class WhatsAppClient(QMainWindow):
         profile.setPersistentStoragePath(storage_path)
         profile.setPersistentCookiesPolicy(QWebEngineProfile.PersistentCookiesPolicy.ForcePersistentCookies)
         
+        # Limitar la cache HTTP en disco a 80 MB para evitar saturacion de I/O y memoria
+        profile.setHttpCacheType(QWebEngineProfile.HttpCacheType.DiskHttpCache)
+        profile.setHttpCacheMaximumSize(80 * 1024 * 1024)
+        
         # Corrector Ortográfico Nativo
         profile.setSpellCheckEnabled(True)
         profile.setSpellCheckLanguages(["es-ES", "en-US"])
@@ -230,11 +249,6 @@ class WhatsAppClient(QMainWindow):
         
         # Configurar atajos de cambio rápido de chat (Alt+1..9, Alt+0)
         self.setup_chat_shortcuts()
-        
-        # Timer para leer los últimos chats de WhatsApp Web periódicamente
-        self.chat_scrape_timer = QTimer(self)
-        self.chat_scrape_timer.timeout.connect(self.scrape_recent_chats)
-        self.chat_scrape_timer.start(10000) # Cada 10 segundos
 
         # Estado inicial
         self.dnd_mode = False
@@ -292,10 +306,28 @@ class WhatsAppClient(QMainWindow):
                 self.recent_chats = json.loads(result)
             except (json.JSONDecodeError, TypeError):
                 pass
+
+    def _update_recent_chat(self, name, message):
+        """Actualizacion reactiva: coloca el chat que recibio mensaje al tope de la lista."""
+        if not name:
+            return
+        clean_name = name.strip()
+        # Filtrar el chat si ya existia para reinsertarlo en la primera posicion
+        self.recent_chats = [c for c in self.recent_chats if c.get("name") != clean_name]
+        self.recent_chats.insert(0, {
+            "name": clean_name,
+            "lastMsg": message.strip()[:50] if message else ""
+        })
+        if len(self.recent_chats) > 10:
+            self.recent_chats = self.recent_chats[:10]
     
     def build_tray_menu(self):
         """Reconstruye el menú de la bandeja con los chats recientes."""
         self.tray_menu.clear()
+        
+        # Si la lista esta vacia, intentar una lectura bajo demanda
+        if not self.recent_chats:
+            self.scrape_recent_chats()
         
         if self.recent_chats:
             # Submenú de chats recientes
@@ -394,6 +426,9 @@ class WhatsAppClient(QMainWindow):
             icon_path = os.path.join(temp_dir, f"{safe_title}.png")
             notification.icon().save(icon_path, "PNG")
         
+        # Actualizacion reactiva: registrar el chat con mensaje nuevo al tope de la bandeja
+        self._update_recent_chat(title, body)
+
         # Enviar comando al demonio DBus
         command = f"{title}|{body}|{icon_path}\n"
         self.dbus_daemon.write(command.encode('utf-8'))
@@ -466,6 +501,8 @@ class WhatsAppClient(QMainWindow):
             return
         # Inyectar helpers de chats y atajos de teclado Alt
         QTimer.singleShot(2500, self.init_chat_helpers)
+        # Lectura inicial unica de chats recientes para la bandeja del sistema
+        QTimer.singleShot(4000, self.scrape_recent_chats)
 
 
     # --- Gestor de Descargas ---
