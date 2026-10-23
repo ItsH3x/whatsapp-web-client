@@ -20,6 +20,7 @@ whatsapp.tar.gz
 scratch/
 .system_generated/
 *.log
+CONTEXT.md
 
 # Datos locales del usuario / sesión
 *.user
