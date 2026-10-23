@@ -1,0 +1,27 @@
+# Python & Entornos virtuales
+__pycache__/
+*.py[cod]
+*$py.class
+venv/
+.env/
+env/
+*.venv/
+
+# Paquetes y compilación de Arch Linux
+pkg/
+src/
+*.pkg.tar.zst
+*.pkg.tar.xz
+*.pkg.tar.gz
+whatsapp.tar.gz
+*.tar.gz
+
+# Archivos temporales y de desarrollo local
+scratch/
+.system_generated/
+*.log
+
+# Datos locales del usuario / sesión
+*.user
+.DS_Store
+.directory

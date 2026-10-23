@@ -1,0 +1,11 @@
+[Desktop Entry]
+Version=1.0
+Name=WhatsApp Web
+Comment=Cliente no oficial de WhatsApp
+Exec=/usr/bin/whatsapp-web-client %U
+Icon=whatsapp-web-client
+Terminal=false
+Type=Application
+Categories=Network;InstantMessaging;
+Keywords=whatsapp;chat;im;messaging;
+MimeType=x-scheme-handler/whatsapp;
