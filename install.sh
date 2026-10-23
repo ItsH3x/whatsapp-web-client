@@ -28,6 +28,61 @@ echo "=========================================="
 echo " Instalador de WhatsApp Web Client"
 echo "=========================================="
 
+# Función para verificar dependencias de Python requeridas
+check_dependencies() {
+    local missing_deps=()
+    python3 -c "import PyQt6" 2>/dev/null || missing_deps+=("PyQt6")
+    python3 -c "import PyQt6.QtWebEngineWidgets" 2>/dev/null || missing_deps+=("PyQt6-WebEngine")
+    python3 -c "import dbus" 2>/dev/null || missing_deps+=("dbus-python")
+    python3 -c "import gi" 2>/dev/null || missing_deps+=("PyGObject")
+
+    if [ ${#missing_deps[@]} -eq 0 ]; then
+        return 0
+    fi
+
+    echo ""
+    echo "⚠️  Faltan dependencias necesarias del sistema: ${missing_deps[*]}"
+    echo ""
+
+    # Detectar el gestor de paquetes de la distribución
+    local install_cmd=""
+    if command -v pacman >/dev/null 2>&1; then
+        install_cmd="sudo pacman -S --needed python python-pyqt6 python-pyqt6-webengine python-dbus python-gobject"
+    elif command -v apt-get >/dev/null 2>&1; then
+        install_cmd="sudo apt-get update && sudo apt-get install -y python3 python3-pyqt6 python3-pyqt6.qtwebengine python3-dbus python3-gi"
+    elif command -v dnf >/dev/null 2>&1; then
+        install_cmd="sudo dnf install -y python3 python3-pyqt6 python3-pyqt6-webengine python3-dbus python3-gobject"
+    elif command -v zypper >/dev/null 2>&1; then
+        install_cmd="sudo zypper install -y python3-qt6 python3-qt6-webengine python3-dbus-python python3-gobject"
+    fi
+
+    if [ -n "$install_cmd" ]; then
+        # Si se ejecuta de forma interactiva (en una terminal)
+        if [ -t 0 ]; then
+            read -p "¿Deseas instalar las dependencias automáticamente ahora? [S/n]: " ans
+            ans=${ans:-S}
+            if [[ "$ans" =~ ^[sSyY]$ ]]; then
+                echo "Ejecutando: $install_cmd"
+                eval "$install_cmd"
+                return 0
+            fi
+        fi
+        echo "Por favor, instala las dependencias manualmente ejecutando:"
+        echo "  $install_cmd"
+    else
+        echo "Por favor instala manualmente los paquetes correspondientes para tu distribución:"
+        echo "  - Python 3"
+        echo "  - PyQt6 y PyQt6-WebEngine"
+        echo "  - dbus-python y PyGObject"
+    fi
+    echo ""
+    echo "Instalación cancelada debido a dependencias faltantes."
+    exit 1
+}
+
+# Verificar dependencias antes de continuar
+check_dependencies
+
 # Determinar modo de instalación (in-place o copia permanente)
 INSTALL_DIR="$TARGET_DIR"
 if [ "$1" = "--in-place" ]; then
