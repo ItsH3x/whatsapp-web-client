@@ -392,9 +392,12 @@ class WhatsAppClient(QMainWindow):
         pin_config_action.triggered.connect(self.open_pin_config)
         self.tray_menu.addAction(pin_config_action)
         
-        quit_action = QAction("Salir", self)
-        quit_action.triggered.connect(QApplication.instance().quit)
-        self.tray_menu.addAction(quit_action)
+        # Si la app está bloqueada, ocultar 'Salir' para evitar que se cierre fácilmente
+        is_locked = hasattr(self, "lock_overlay") and self.lock_overlay.is_locked()
+        if not is_locked:
+            quit_action = QAction("Salir", self)
+            quit_action.triggered.connect(QApplication.instance().quit)
+            self.tray_menu.addAction(quit_action)
 
 
     def tray_activated(self, reason):
