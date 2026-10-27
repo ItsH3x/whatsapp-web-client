@@ -1088,10 +1088,15 @@ if __name__ == '__main__':
     from PyQt6.QtNetwork import QLocalSocket, QLocalServer
     app = QApplication(sys.argv)
     
-    # Configurar el nombre de la aplicación para el gestor de ventanas (Linux)
-    app.setApplicationName("WhatsApp Web")
+    # Identidad de la aplicación para Wayland y X11 (agrupación en la barra de tareas de KDE)
+    app.setApplicationName("whatsapp-web")
     app.setApplicationDisplayName("WhatsApp Web")
-    app.setDesktopFileName("whatsapp-web-client.desktop")
+    app.setDesktopFileName("whatsapp-web.desktop")
+    
+    # Asegurar el icono global de la aplicación
+    icon_path = os.path.join(os.path.dirname(__file__), "whatsapp.svg")
+    if os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
     
     server_name = "WhatsAppWebClientServer"
     socket = QLocalSocket()

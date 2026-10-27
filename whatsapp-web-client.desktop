@@ -6,6 +6,8 @@ Exec=/usr/bin/whatsapp-web-client %U
 Icon=whatsapp-web-client
 Terminal=false
 Type=Application
+StartupWMClass=whatsapp-web
 Categories=Network;InstantMessaging;
 Keywords=whatsapp;chat;im;messaging;
 MimeType=x-scheme-handler/whatsapp;
+

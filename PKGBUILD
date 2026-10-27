@@ -17,6 +17,7 @@ source=(
     "launcher.sh"
     "whatsapp-web-client.desktop"
 )
+
 sha256sums=('SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP' 'SKIP')
 
 package() {

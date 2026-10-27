@@ -136,11 +136,17 @@ Exec=$LAUNCHER_BIN %U
 Icon=$INSTALL_DIR/whatsapp.svg
 Terminal=false
 Type=Application
+StartupWMClass=whatsapp-web
 Categories=Network;InstantMessaging;
 Keywords=whatsapp;chat;im;messaging;
 MimeType=x-scheme-handler/whatsapp;
 EOF
 chmod +x "$DESKTOP_FILE"
+
+# Instalar icono en el tema hicolor para integración con Wayland/KDE
+ICON_HICOLOR_DIR="$HOME/.local/share/icons/hicolor/scalable/apps"
+mkdir -p "$ICON_HICOLOR_DIR"
+cp -u "$SOURCE_DIR/whatsapp.svg" "$ICON_HICOLOR_DIR/whatsapp-web.svg"
 
 # Registrar manejador para enlaces whatsapp:// si xdg-mime está disponible
 if command -v xdg-mime >/dev/null 2>&1; then
