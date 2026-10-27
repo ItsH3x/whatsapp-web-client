@@ -54,3 +54,32 @@ def verify_pin(candidate_pin: str) -> bool:
 def has_pin() -> bool:
     """Verifica si ya hay un PIN configurado."""
     return bool(get_pin_hash())
+
+
+# --- Persistencia del Estado de Bloqueo ---
+
+def is_app_locked() -> bool:
+    """Retorna True si la aplicacion quedo en estado bloqueado."""
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = json.load(f)
+                return bool(config.get("is_locked", False))
+        except Exception:
+            pass
+    return False
+
+def set_app_locked(locked: bool):
+    """Guarda el estado de bloqueo en config.json."""
+    ensure_directories()
+    config = {}
+    if CONFIG_FILE.exists():
+        try:
+            with open(CONFIG_FILE, "r", encoding="utf-8") as f:
+                config = json.load(f)
+        except Exception:
+            pass
+    config["is_locked"] = bool(locked)
+    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+

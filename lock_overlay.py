@@ -219,13 +219,14 @@ class LockOverlay(QWidget):
 
     def lock(self):
         self._is_locked = True
+        config_manager.set_app_locked(True)
         self.txt_pin.clear()
         self.pill_frame.setStyleSheet(self.pill_style_normal)
 
         if not config_manager.has_pin():
             self.lbl_title.setText("Crea tu PIN de seguridad")
             self.lbl_status.setStyleSheet("color: #8696a0; font-size: 12px; background: transparent;")
-            self.lbl_status.setText("Ingresa 4 dígitos para proteger tu sesión")
+            self.lbl_status.setText("Ingresa 4 digitos para proteger tu sesion")
         else:
             self.lbl_title.setText("WhatsApp bloqueado")
             self.lbl_status.setStyleSheet("color: #8696a0; font-size: 12px; background: transparent;")
@@ -240,6 +241,7 @@ class LockOverlay(QWidget):
 
     def unlock(self):
         self._is_locked = False
+        config_manager.set_app_locked(False)
         self.txt_pin.clear()
         self.lbl_status.setText("")
         self.setVisible(False)

@@ -28,6 +28,7 @@ from PyQt6.QtWebEngineWidgets import QWebEngineView
 from PyQt6.QtWebEngineCore import QWebEngineProfile, QWebEnginePage
 
 
+import config_manager
 from lock_overlay import LockOverlay, PinConfigDialog
 
 
@@ -261,6 +262,11 @@ class WhatsAppClient(QMainWindow):
         # Atajo de bloqueo de aplicación (Alt+B)
         self.setup_privacy_shortcut()
 
+        # Restaurar estado de bloqueo si persistia activo
+        if config_manager.has_pin() and config_manager.is_app_locked():
+            self._apply_native_blur(radius=24)
+            self.lock_overlay.lock()
+
     def grant_feature_permission(self, url, feature):
         # Otorgar todos los permisos que WhatsApp solicite (notificaciones, micrófono, cámara, etc.)
         self.browser.page().setFeaturePermission(url, feature, QWebEnginePage.PermissionPolicy.PermissionGrantedByUser)
@@ -415,8 +421,14 @@ class WhatsAppClient(QMainWindow):
         if getattr(self, "dnd_mode", False):
             return
 
+        is_locked = hasattr(self, "lock_overlay") and self.lock_overlay.is_locked()
+
         title = notification.title().replace('|', '-')
-        body = notification.message().replace('\n', ' ').replace('|', '-')
+        if is_locked:
+            body = "Nuevo mensaje (WhatsApp bloqueado)"
+        else:
+            body = notification.message().replace('\n', ' ').replace('|', '-')
+
         
         icon_path = ""
         if not notification.icon().isNull():
@@ -971,6 +983,8 @@ class WhatsAppClient(QMainWindow):
         chats fijados y normales en su orden visual exacto (omitiendo Archivados).
         Los badges permanecen visibles mientras Alt siga presionado.
         """
+        if hasattr(self, "lock_overlay") and self.lock_overlay.is_locked():
+            return
         js = f"""
         (function() {{
             var validChats = (window.__waGetValidChats) ? window.__waGetValidChats() : [];
