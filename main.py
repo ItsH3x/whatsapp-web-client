@@ -409,15 +409,9 @@ class WhatsAppClient(QMainWindow):
                 self.hide()
 
     def closeEvent(self, event):
-        # En lugar de cerrar, minimizar a la bandeja del sistema
+        # En lugar de cerrar, minimizar a la bandeja del sistema silenciosamente
         event.ignore()
         self.hide()
-        self.tray_icon.showMessage(
-            "WhatsApp Web",
-            "La aplicación sigue ejecutándose en segundo plano.",
-            QSystemTrayIcon.MessageIcon.Information,
-            2000
-        )
 
     # --- Funcionalidad de Notificaciones Nativas y Respuesta Rápida ---
     def handle_notification(self, notification):
