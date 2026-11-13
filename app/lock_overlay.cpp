@@ -1,0 +1,725 @@
+#include "lock_overlay.h"
+#include "config_manager.h"
+
+#include <QVBoxLayout>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QLineEdit>
+#include <QPushButton>
+#include <QCheckBox>
+#include <QFrame>
+#include <QGraphicsDropShadowEffect>
+#include <QPropertyAnimation>
+#include <QEasingCurve>
+#include <QIntValidator>
+#include <QSettings>
+#include <QMessageBox>
+#include <QTimer>
+#include <QPainter>
+#include <QKeyEvent>
+#include <QMouseEvent>
+#include <QWheelEvent>
+#include <QContextMenuEvent>
+#include <QStyleOption>
+#include <QStyle>
+
+// ============================================================================
+// PrivacyInstructionDialog Implementation
+// ============================================================================
+
+PrivacyInstructionDialog::PrivacyInstructionDialog(QWidget *parent, const QString &mode)
+    : QDialog(parent)
+    , m_mode(mode)
+{
+    setWindowFlags(Qt::FramelessWindowHint | Qt::Dialog);
+    setAttribute(Qt::WA_TranslucentBackground, true);
+    setAttribute(Qt::WA_DeleteOnClose, true);
+    setFixedWidth(460);
+
+    setStyleSheet(QStringLiteral(R"(
+        QDialog {
+            background-color: #111b21;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 14px;
+        }
+        QLabel {
+            color: #e9edef;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+        }
+        QCheckBox {
+            color: #8696a0;
+            font-size: 13px;
+            spacing: 8px;
+        }
+        QCheckBox::indicator {
+            width: 18px;
+            height: 18px;
+            border: 1.5px solid #8696a0;
+            border-radius: 4px;
+            background: transparent;
+        }
+        QCheckBox::indicator:checked {
+            background-color: #00a884;
+            border-color: #00a884;
+        }
+        QPushButton#btnOk {
+            background-color: #00a884;
+            color: #ffffff;
+            font-weight: 700;
+            font-size: 13px;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 24px;
+            min-width: 80px;
+        }
+        QPushButton#btnOk:hover {
+            background-color: #02906f;
+        }
+        QPushButton#btnOk:focus {
+            border: 2px solid #ffffff;
+        }
+    )"));
+
+    auto *layout = new QVBoxLayout(this);
+    layout->setContentsMargins(24, 22, 24, 20);
+    layout->setSpacing(14);
+
+    QString titleText = (mode == QStringLiteral("privacy"))
+        ? QStringLiteral("Modo Privacidad activado")
+        : QStringLiteral("Bloqueo de app activado");
+
+    auto *lblTitle = new QLabel(
+        QStringLiteral("<h3 style='margin:0; color:#00a884; font-size:16px;'>") + titleText + QStringLiteral("</h3>"),
+        this
+    );
+    layout->addWidget(lblTitle);
+
+    QString msgHtml = QStringLiteral(R"(
+        <p style='color:#e9edef; font-size:13px; line-height:1.5; margin:0;'>
+        Puedes controlar rapidamente estas funciones usando tu teclado:
+        </p>
+        <div style='background:rgba(255,255,255,0.06); padding:10px 14px; border-radius:8px; margin-top:4px;'>
+            <p style='margin:0 0 6px 0; font-size:13px; color:#e9edef;'>
+                <b style='color:#00a884;'>Pulsar Alt + B:</b> Activa o desactiva el <i>Modo Privacidad</i> (desenfoque rapido sin PIN).
+            </p>
+            <p style='margin:0; font-size:13px; color:#e9edef;'>
+                <b style='color:#00a884;'>Mantener Alt + B:</b> Bloquea la app con tu <i>PIN de seguridad</i>.
+            </p>
+        </div>
+    )");
+
+    auto *lblMsg = new QLabel(msgHtml, this);
+    lblMsg->setWordWrap(true);
+    layout->addWidget(lblMsg);
+
+    m_chkDontShow = new QCheckBox(QStringLiteral("No volver a mostrar este mensaje"), this);
+    layout->addWidget(m_chkDontShow);
+
+    auto *btnLayout = new QHBoxLayout();
+    btnLayout->addStretch();
+
+    m_btnOk = new QPushButton(QStringLiteral("OK"), this);
+    m_btnOk->setObjectName(QStringLiteral("btnOk"));
+    m_btnOk->setDefault(true);
+    m_btnOk->setCursor(Qt::PointingHandCursor);
+    connect(m_btnOk, &QPushButton::clicked, this, &PrivacyInstructionDialog::accept);
+
+    btnLayout->addWidget(m_btnOk);
+    layout->addLayout(btnLayout);
+
+    m_btnOk->setFocus();
+}
+
+void PrivacyInstructionDialog::accept() {
+    if (m_chkDontShow && m_chkDontShow->isChecked()) {
+        QSettings settings(QStringLiteral("WhatsAppWebClient"), QStringLiteral("WhatsAppWebClient"));
+        settings.setValue(QStringLiteral("hide_privacy_instructions"), true);
+    }
+    QDialog::accept();
+}
+
+void PrivacyInstructionDialog::paintEvent(QPaintEvent *event) {
+    Q_UNUSED(event);
+    QStyleOption opt;
+    opt.initFrom(this);
+    QPainter p(this);
+    style()->drawPrimitive(QStyle::PE_Widget, &opt, &p, this);
+}
+
+void PrivacyInstructionDialog::mousePressEvent(QMouseEvent *event) {
+    if (event->button() == Qt::LeftButton) {
+        m_dragPosition = event->globalPosition().toPoint() - frameGeometry().topLeft();
+        event->accept();
+    } else {
+        QDialog::mousePressEvent(event);
+    }
+}
+
+void PrivacyInstructionDialog::mouseMoveEvent(QMouseEvent *event) {
+    if (event->buttons() & Qt::LeftButton) {
+        move(event->globalPosition().toPoint() - m_dragPosition);
+        event->accept();
+    } else {
+        QDialog::mouseMoveEvent(event);
+    }
+}
+
+// ============================================================================
+// PinConfigDialog Implementation
+// ============================================================================
+
+PinConfigDialog::PinConfigDialog(QWidget *parent)
+    : QDialog(parent)
+{
+    initUi();
+}
+
+void PinConfigDialog::initUi() {
+    setWindowFlags(Qt::FramelessWindowHint | Qt::Dialog);
+    setAttribute(Qt::WA_TranslucentBackground, true);
+    setFixedWidth(400);
+
+    auto *rootLayout = new QVBoxLayout(this);
+    rootLayout->setContentsMargins(12, 12, 12, 12);
+
+    m_container = new QFrame(this);
+    m_container->setObjectName(QStringLiteral("dialogContainer"));
+
+    auto *shadow = new QGraphicsDropShadowEffect(this);
+    shadow->setBlurRadius(30);
+    shadow->setColor(QColor(0, 0, 0, 180));
+    shadow->setOffset(0, 8);
+    m_container->setGraphicsEffect(shadow);
+
+    m_container->setStyleSheet(QStringLiteral(R"(
+        QFrame#dialogContainer {
+            background-color: #111b21;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 14px;
+        }
+        QLabel {
+            color: #e9edef;
+            font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+            font-size: 13px;
+        }
+        QLineEdit {
+            background-color: rgba(0, 0, 0, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 8px;
+            color: #ffffff;
+            font-size: 16px;
+            letter-spacing: 4px;
+            padding: 6px 12px;
+        }
+        QLineEdit:focus {
+            border: 1.5px solid #00a884;
+            background-color: rgba(0, 0, 0, 0.75);
+        }
+        QPushButton#btnSave {
+            background-color: #00a884;
+            color: #ffffff;
+            font-weight: 700;
+            font-size: 13px;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 18px;
+            min-width: 80px;
+        }
+        QPushButton#btnSave:hover {
+            background-color: #02906f;
+        }
+        QPushButton#btnRemove {
+            background-color: #da373c;
+            color: #ffffff;
+            font-weight: 600;
+            font-size: 13px;
+            border: none;
+            border-radius: 6px;
+            padding: 8px 14px;
+        }
+        QPushButton#btnRemove:hover {
+            background-color: #c02e34;
+        }
+        QPushButton#btnCancel {
+            background-color: transparent;
+            color: #8696a0;
+            font-weight: 600;
+            font-size: 13px;
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 6px;
+            padding: 8px 16px;
+        }
+        QPushButton#btnCancel:hover {
+            background-color: rgba(255, 255, 255, 0.05);
+            color: #e9edef;
+        }
+    )"));
+
+    auto *layout = new QVBoxLayout(m_container);
+    layout->setContentsMargins(24, 22, 24, 20);
+    layout->setSpacing(12);
+
+    bool hasPin = ConfigManager::hasPin();
+
+    QString titleText = hasPin
+        ? QStringLiteral("Cambiar PIN de seguridad")
+        : QStringLiteral("Configurar PIN de seguridad");
+
+    auto *lblTitle = new QLabel(
+        QStringLiteral("<h3 style='margin:0; color:#00a884; font-size:16px;'>") + titleText + QStringLiteral("</h3>"),
+        m_container
+    );
+    layout->addWidget(lblTitle);
+
+    if (hasPin) {
+        layout->addWidget(new QLabel(QStringLiteral("PIN actual:"), m_container));
+        m_txtCurrent = new QLineEdit(m_container);
+        m_txtCurrent->setEchoMode(QLineEdit::Password);
+        m_txtCurrent->setMaxLength(6);
+        m_txtCurrent->setValidator(new QIntValidator(0, 999999, this));
+        m_txtCurrent->setPlaceholderText(QStringLiteral("····"));
+        layout->addWidget(m_txtCurrent);
+    }
+
+    layout->addWidget(new QLabel(QStringLiteral("Nuevo PIN (4-6 digitos):"), m_container));
+    m_txtNew = new QLineEdit(m_container);
+    m_txtNew->setEchoMode(QLineEdit::Password);
+    m_txtNew->setMaxLength(6);
+    m_txtNew->setValidator(new QIntValidator(0, 999999, this));
+    m_txtNew->setPlaceholderText(QStringLiteral("····"));
+    layout->addWidget(m_txtNew);
+
+    layout->addWidget(new QLabel(QStringLiteral("Confirmar nuevo PIN:"), m_container));
+    m_txtConfirm = new QLineEdit(m_container);
+    m_txtConfirm->setEchoMode(QLineEdit::Password);
+    m_txtConfirm->setMaxLength(6);
+    m_txtConfirm->setValidator(new QIntValidator(0, 999999, this));
+    m_txtConfirm->setPlaceholderText(QStringLiteral("····"));
+    layout->addWidget(m_txtConfirm);
+
+    connect(m_txtConfirm, &QLineEdit::returnPressed, this, &PinConfigDialog::savePin);
+
+    auto *actionsLayout = new QHBoxLayout();
+    actionsLayout->setSpacing(8);
+
+    m_btnCancel = new QPushButton(QStringLiteral("Cancelar"), m_container);
+    m_btnCancel->setObjectName(QStringLiteral("btnCancel"));
+    m_btnCancel->setCursor(Qt::PointingHandCursor);
+    connect(m_btnCancel, &QPushButton::clicked, this, &QDialog::reject);
+    actionsLayout->addWidget(m_btnCancel);
+
+    if (hasPin) {
+        m_btnRemove = new QPushButton(QStringLiteral("Quitar PIN"), m_container);
+        m_btnRemove->setObjectName(QStringLiteral("btnRemove"));
+        m_btnRemove->setCursor(Qt::PointingHandCursor);
+        connect(m_btnRemove, &QPushButton::clicked, this, &PinConfigDialog::removePin);
+        actionsLayout->addWidget(m_btnRemove);
+    }
+
+    actionsLayout->addStretch();
+
+    m_btnSave = new QPushButton(QStringLiteral("Guardar PIN"), m_container);
+    m_btnSave->setObjectName(QStringLiteral("btnSave"));
+    m_btnSave->setDefault(true);
+    m_btnSave->setCursor(Qt::PointingHandCursor);
+    connect(m_btnSave, &QPushButton::clicked, this, &PinConfigDialog::savePin);
+    actionsLayout->addWidget(m_btnSave);
+
+    layout->addLayout(actionsLayout);
+    rootLayout->addWidget(m_container);
+
+    if (m_txtCurrent) {
+        m_txtCurrent->setFocus();
+    } else {
+        m_txtNew->setFocus();
+    }
+}
+
+void PinConfigDialog::savePin() {
+    if (m_txtCurrent) {
+        QString current = m_txtCurrent->text().trimmed();
+        if (!ConfigManager::verifyPin(current)) {
+            QMessageBox::warning(this, QStringLiteral("Error"), QStringLiteral("El PIN actual es incorrecto."));
+            return;
+        }
+    }
+
+    QString newPin = m_txtNew->text().trimmed();
+    QString confirmPin = m_txtConfirm->text().trimmed();
+
+    if (newPin.length() < 4) {
+        QMessageBox::warning(this, QStringLiteral("Error"), QStringLiteral("El nuevo PIN debe tener al menos 4 digitos."));
+        return;
+    }
+
+    if (newPin != confirmPin) {
+        QMessageBox::warning(this, QStringLiteral("Error"), QStringLiteral("El nuevo PIN y su confirmacion no coinciden."));
+        return;
+    }
+
+    ConfigManager::setPin(newPin);
+    QMessageBox::information(this, QStringLiteral("Guardado"), QStringLiteral("El PIN de seguridad se ha guardado correctamente."));
+    accept();
+}
+
+void PinConfigDialog::removePin() {
+    if (m_txtCurrent) {
+        QString current = m_txtCurrent->text().trimmed();
+        if (!ConfigManager::verifyPin(current)) {
+            QMessageBox::warning(this, QStringLiteral("Error"), QStringLiteral("El PIN actual es incorrecto."));
+            return;
+        }
+    }
+
+    ConfigManager::setPin(QString());
+    QMessageBox::information(this, QStringLiteral("PIN eliminado"), QStringLiteral("El PIN de seguridad ha sido desactivado."));
+    accept();
+}
+
+void PinConfigDialog::mousePressEvent(QMouseEvent *event) {
+    if (event->button() == Qt::LeftButton) {
+        m_dragPosition = event->globalPosition().toPoint() - frameGeometry().topLeft();
+        event->accept();
+    } else {
+        QDialog::mousePressEvent(event);
+    }
+}
+
+void PinConfigDialog::mouseMoveEvent(QMouseEvent *event) {
+    if (event->buttons() & Qt::LeftButton) {
+        move(event->globalPosition().toPoint() - m_dragPosition);
+        event->accept();
+    } else {
+        QDialog::mouseMoveEvent(event);
+    }
+}
+
+// ============================================================================
+// LockOverlay Implementation
+// ============================================================================
+
+const QString LockOverlay::s_pillStyleNormal = QStringLiteral(R"(
+    QFrame#pillFrame {
+        background: qlineargradient(
+            x1: 0, y1: 0, x2: 1, y2: 1,
+            stop: 0 rgba(26, 33, 42, 0.94),
+            stop: 1 rgba(16, 21, 28, 0.96)
+        );
+        border: 1px solid rgba(255, 255, 255, 0.18);
+        border-radius: 28px;
+    }
+)");
+
+const QString LockOverlay::s_pillStyleError = QStringLiteral(R"(
+    QFrame#pillFrame {
+        background: qlineargradient(
+            x1: 0, y1: 0, x2: 1, y2: 1,
+            stop: 0 rgba(45, 22, 28, 0.96),
+            stop: 1 rgba(25, 15, 18, 0.98)
+        );
+        border: 1.5px solid #ff453a;
+        border-radius: 28px;
+    }
+)");
+
+LockOverlay::LockOverlay(QWidget *parent)
+    : QWidget(parent)
+    , m_isLocked(false)
+{
+    setAttribute(Qt::WA_NoSystemBackground, true);
+    setFocusPolicy(Qt::StrongFocus);
+    setVisible(false);
+
+    if (parent) {
+        parent->installEventFilter(this);
+    }
+
+    initUi();
+}
+
+void LockOverlay::initUi() {
+    auto *mainLayout = new QVBoxLayout(this);
+    mainLayout->setAlignment(Qt::AlignCenter);
+    mainLayout->setContentsMargins(0, 0, 0, 0);
+
+    m_pillFrame = new QFrame(this);
+    m_pillFrame->setObjectName(QStringLiteral("pillFrame"));
+    m_pillFrame->setFixedWidth(440);
+
+    auto *shadow = new QGraphicsDropShadowEffect(this);
+    shadow->setBlurRadius(45);
+    shadow->setColor(QColor(0, 0, 0, 200));
+    shadow->setOffset(0, 14);
+    m_pillFrame->setGraphicsEffect(shadow);
+
+    m_pillFrame->setStyleSheet(s_pillStyleNormal);
+
+    auto *pillLayout = new QVBoxLayout(m_pillFrame);
+    pillLayout->setContentsMargins(28, 22, 28, 22);
+    pillLayout->setSpacing(14);
+
+    // Cabecera de la pill: Titulo
+    auto *headerLayout = new QHBoxLayout();
+    headerLayout->setSpacing(10);
+
+    m_lblTitle = new QLabel(QStringLiteral("WhatsApp bloqueado"), m_pillFrame);
+    m_lblTitle->setStyleSheet(QStringLiteral(R"(
+        color: #f0f2f5;
+        font-size: 15px;
+        font-weight: 600;
+        background: transparent;
+        letter-spacing: 0.5px;
+    )"));
+
+    headerLayout->addWidget(m_lblTitle);
+    headerLayout->addStretch();
+    pillLayout->addLayout(headerLayout);
+
+    // Fila de Entrada: Input de PIN censurado + Boton Desbloquear
+    auto *inputLayout = new QHBoxLayout();
+    inputLayout->setSpacing(12);
+
+    m_txtPin = new QLineEdit(m_pillFrame);
+    m_txtPin->setEchoMode(QLineEdit::Password);
+    m_txtPin->setMaxLength(6);
+    m_txtPin->setAlignment(Qt::AlignCenter);
+    m_txtPin->setPlaceholderText(QStringLiteral("····"));
+    m_txtPin->setValidator(new QIntValidator(0, 999999, this));
+    m_txtPin->setStyleSheet(QStringLiteral(R"(
+        QLineEdit {
+            background-color: rgba(0, 0, 0, 0.55);
+            border: 1px solid rgba(255, 255, 255, 0.15);
+            border-radius: 20px;
+            color: #ffffff;
+            font-size: 22px;
+            font-weight: bold;
+            letter-spacing: 6px;
+            padding: 6px 16px;
+            min-height: 28px;
+        }
+        QLineEdit:focus {
+            border: 1.5px solid #00a884;
+            background-color: rgba(0, 0, 0, 0.75);
+        }
+    )"));
+
+    connect(m_txtPin, &QLineEdit::textChanged, this, &LockOverlay::onPinChanged);
+    connect(m_txtPin, &QLineEdit::returnPressed, this, &LockOverlay::submitPin);
+
+    m_btnUnlock = new QPushButton(QStringLiteral("Desbloquear"), m_pillFrame);
+    m_btnUnlock->setObjectName(QStringLiteral("btnUnlock"));
+    m_btnUnlock->setFixedHeight(42);
+    m_btnUnlock->setMinimumWidth(105);
+    m_btnUnlock->setCursor(Qt::PointingHandCursor);
+    m_btnUnlock->setStyleSheet(QStringLiteral(R"(
+        QPushButton {
+            background-color: #00a884;
+            color: #ffffff;
+            font-size: 13px;
+            font-weight: bold;
+            border: none;
+            border-radius: 21px;
+            padding: 0 16px;
+        }
+        QPushButton:hover {
+            background-color: #02be94;
+        }
+        QPushButton:pressed {
+            background-color: #008f6f;
+        }
+    )"));
+    connect(m_btnUnlock, &QPushButton::clicked, this, &LockOverlay::submitPin);
+
+    inputLayout->addWidget(m_txtPin, 1);
+    inputLayout->addWidget(m_btnUnlock);
+    pillLayout->addLayout(inputLayout);
+
+    // Etiqueta de estado / error
+    m_lblStatus = new QLabel(QString(), m_pillFrame);
+    m_lblStatus->setAlignment(Qt::AlignCenter);
+    m_lblStatus->setStyleSheet(QStringLiteral(R"(
+        color: #8696a0;
+        font-size: 12px;
+        background: transparent;
+    )"));
+    pillLayout->addWidget(m_lblStatus);
+
+    mainLayout->addWidget(m_pillFrame);
+}
+
+void LockOverlay::paintEvent(QPaintEvent *event) {
+    Q_UNUSED(event);
+    QPainter painter(this);
+    painter.fillRect(rect(), QColor(0, 0, 0, 45));
+}
+
+void LockOverlay::onPinChanged(const QString &text) {
+    if (ConfigManager::hasPin() && text.length() == 4) {
+        submitPin();
+    }
+}
+
+void LockOverlay::submitPin() {
+    QString enteredPin = m_txtPin->text().trimmed();
+    if (enteredPin.isEmpty()) {
+        return;
+    }
+
+    if (!ConfigManager::hasPin()) {
+        if (enteredPin.length() < 4) {
+            setErrorStatus(QStringLiteral("El PIN debe tener al menos 4 digitos"));
+            shakePill();
+            return;
+        }
+        ConfigManager::setPin(enteredPin);
+        m_lblStatus->setStyleSheet(QStringLiteral("color: #00a884; font-size: 12px; background: transparent;"));
+        m_lblStatus->setText(QStringLiteral("PIN configurado correctamente."));
+        QTimer::singleShot(600, this, &LockOverlay::unlock);
+        return;
+    }
+
+    if (ConfigManager::verifyPin(enteredPin)) {
+        unlock();
+    } else {
+        setErrorStatus(QStringLiteral("PIN incorrecto. Intentalo de nuevo."));
+        shakePill();
+    }
+}
+
+void LockOverlay::submit_pin() {
+    submitPin();
+}
+
+void LockOverlay::setErrorStatus(const QString &message) {
+    m_lblStatus->setStyleSheet(QStringLiteral("color: #ff453a; font-size: 12px; font-weight: 500; background: transparent;"));
+    m_lblStatus->setText(message);
+    m_pillFrame->setStyleSheet(s_pillStyleError);
+    m_txtPin->selectAll();
+}
+
+void LockOverlay::set_error_status(const QString &message) {
+    setErrorStatus(message);
+}
+
+void LockOverlay::shakePill() {
+    QPoint originalPos = m_pillFrame->pos();
+    if (!m_anim) {
+        m_anim = new QPropertyAnimation(m_pillFrame, "pos", this);
+    }
+    m_anim->stop();
+    m_anim->setDuration(350);
+    m_anim->setEasingCurve(QEasingCurve::InOutSine);
+
+    int x = originalPos.x();
+    int y = originalPos.y();
+    m_anim->setKeyValueAt(0.0, QPoint(x, y));
+    m_anim->setKeyValueAt(0.15, QPoint(x - 9, y));
+    m_anim->setKeyValueAt(0.35, QPoint(x + 9, y));
+    m_anim->setKeyValueAt(0.55, QPoint(x - 6, y));
+    m_anim->setKeyValueAt(0.75, QPoint(x + 6, y));
+    m_anim->setKeyValueAt(1.0, QPoint(x, y));
+
+    disconnect(m_anim, &QPropertyAnimation::finished, nullptr, nullptr);
+    connect(m_anim, &QPropertyAnimation::finished, this, [this]() {
+        m_pillFrame->setStyleSheet(s_pillStyleNormal);
+    });
+    m_anim->start();
+}
+
+void LockOverlay::shake_pill() {
+    shakePill();
+}
+
+void LockOverlay::lock() {
+    m_isLocked = true;
+    ConfigManager::setAppLocked(true);
+    m_txtPin->clear();
+    m_pillFrame->setStyleSheet(s_pillStyleNormal);
+
+    if (!ConfigManager::hasPin()) {
+        m_lblTitle->setText(QStringLiteral("Crea tu PIN de seguridad"));
+        m_lblStatus->setStyleSheet(QStringLiteral("color: #8696a0; font-size: 12px; background: transparent;"));
+        m_lblStatus->setText(QStringLiteral("Ingresa 4 digitos para proteger tu sesion"));
+    } else {
+        m_lblTitle->setText(QStringLiteral("WhatsApp bloqueado"));
+        m_lblStatus->setStyleSheet(QStringLiteral("color: #8696a0; font-size: 12px; background: transparent;"));
+        m_lblStatus->setText(QStringLiteral("Introduce tu PIN para desbloquear"));
+    }
+
+    if (parentWidget()) {
+        setGeometry(parentWidget()->rect());
+    }
+    setVisible(true);
+    raise();
+    m_txtPin->setFocus();
+    emit locked();
+}
+
+void LockOverlay::unlock() {
+    m_isLocked = false;
+    ConfigManager::setAppLocked(false);
+    m_txtPin->clear();
+    m_lblStatus->setText(QString());
+    setVisible(false);
+    emit unlocked();
+}
+
+bool LockOverlay::isLocked() const {
+    return m_isLocked;
+}
+
+QLineEdit* LockOverlay::pinInput() const {
+    return m_txtPin;
+}
+
+void LockOverlay::keyPressEvent(QKeyEvent *event) {
+    if (!m_isLocked) {
+        QWidget::keyPressEvent(event);
+        return;
+    }
+    if (m_txtPin && !m_txtPin->hasFocus()) {
+        m_txtPin->setFocus();
+    }
+    QWidget::keyPressEvent(event);
+}
+
+void LockOverlay::keyReleaseEvent(QKeyEvent *event) {
+    if (!m_isLocked) {
+        QWidget::keyReleaseEvent(event);
+        return;
+    }
+    event->accept();
+}
+
+void LockOverlay::mousePressEvent(QMouseEvent *event) {
+    event->accept();
+}
+
+void LockOverlay::mouseReleaseEvent(QMouseEvent *event) {
+    event->accept();
+}
+
+void LockOverlay::mouseDoubleClickEvent(QMouseEvent *event) {
+    event->accept();
+}
+
+void LockOverlay::mouseMoveEvent(QMouseEvent *event) {
+    event->accept();
+}
+
+void LockOverlay::wheelEvent(QWheelEvent *event) {
+    event->accept();
+}
+
+void LockOverlay::contextMenuEvent(QContextMenuEvent *event) {
+    event->accept();
+}
+
+bool LockOverlay::eventFilter(QObject *watched, QEvent *event) {
+    if (watched == parentWidget() && event->type() == QEvent::Resize) {
+        if (parentWidget()) {
+            setGeometry(parentWidget()->rect());
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}

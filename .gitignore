@@ -1,19 +1,26 @@
-# Python & Entornos virtuales
-__pycache__/
-*.py[cod]
-*$py.class
-venv/
-.env/
-env/
-*.venv/
+# Artefactos de compilacion C++ y CMake
+build/
+build-*/
+cmake-build-*/
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+build.ninja
+.ninja_deps
+.ninja_log
+compile_commands.json
+*.o
+*.a
+*.so
+whatsapp-web-client
 
-# Paquetes y compilación de Arch Linux
+# Paquetes y compilacion de Arch Linux (makepkg)
 pkg/
 src/
 *.pkg.tar.zst
 *.pkg.tar.xz
 *.pkg.tar.gz
-whatsapp.tar.gz
 *.tar.gz
 
 # Archivos temporales y de desarrollo local
@@ -22,7 +29,9 @@ scratch/
 *.log
 CONTEXT.md
 
-# Datos locales del usuario / sesión
+# Datos locales del usuario / IDE
 *.user
 .DS_Store
 .directory
+.vscode/
+.idea/

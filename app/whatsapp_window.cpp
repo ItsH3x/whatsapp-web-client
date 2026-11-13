@@ -1,0 +1,3065 @@
+#include "whatsapp_window.h"
+
+#include <QApplication>
+#include <QDesktopServices>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QJsonArray>
+#include <QLineEdit>
+#include <QStandardPaths>
+#include <QWebEngineSettings>
+#include <QWebEngineScript>
+#include <QWebEngineScriptCollection>
+#include <QTime>
+#include <QKeySequence>
+
+// --- WhatsAppPage ---
+
+WhatsAppPage::WhatsAppPage(QWebEngineProfile *profile, QObject *parent)
+    : QWebEnginePage(profile, parent)
+{
+}
+
+WhatsAppPage::WhatsAppPage(QObject *parent)
+    : QWebEnginePage(parent)
+{
+}
+
+bool WhatsAppPage::acceptNavigationRequest(const QUrl &url, NavigationType type, bool isMainFrame) {
+    if (type == NavigationTypeLinkClicked && isMainFrame) {
+        QString host = url.host();
+        if (!host.isEmpty() && !host.contains("whatsapp.com") && !host.contains("whatsapp.net")) {
+            QDesktopServices::openUrl(url);
+            return false;
+        }
+    }
+    return QWebEnginePage::acceptNavigationRequest(url, type, isMainFrame);
+}
+
+QWebEnginePage *WhatsAppPage::createWindow(QWebEnginePage::WebWindowType type) {
+    Q_UNUSED(type);
+    QWebEnginePage *tempPage = new QWebEnginePage(profile(), this);
+    connect(tempPage, &QWebEnginePage::urlChanged, this, [this, tempPage](const QUrl &url) {
+        handleNewWindowUrl(url, tempPage);
+    });
+    return tempPage;
+}
+
+void WhatsAppPage::handleNewWindowUrl(const QUrl &url, QWebEnginePage *tempPage) {
+    if (url.isValid() && (url.scheme() == "http" || url.scheme() == "https")) {
+        QDesktopServices::openUrl(url);
+    }
+    tempPage->deleteLater();
+}
+
+// --- WhatsAppClient ---
+
+WhatsAppClient::WhatsAppClient(QWidget *parent)
+    : QMainWindow(parent)
+    , m_browser(nullptr)
+    , m_profile(nullptr)
+    , m_page(nullptr)
+    , m_lockOverlay(nullptr)
+    , m_notificationManager(nullptr)
+    , m_trayIcon(nullptr)
+    , m_trayMenu(nullptr)
+    , m_dndMode(false)
+    , m_quickPrivacyMode(false)
+    , m_altBDown(false)
+    , m_altBHoldTriggered(false)
+    , m_altBHoldTimer(nullptr)
+    , m_wheelAccumulatedDelta(0)
+    , m_currentChatIndex(-1)
+    , m_altKeyDown(false)
+{
+    setWindowTitle("WhatsApp Web");
+    resize(1024, 768);
+
+    // Icono de la aplicacion y de la bandeja del sistema
+    const QStringList iconCandidates = {
+        QDir::homePath() + "/.local/share/whatsapp-web-client/whatsapp.svg",
+        QDir::homePath() + "/.local/share/icons/hicolor/scalable/apps/whatsapp-web-client.svg",
+        QCoreApplication::applicationDirPath() + "/whatsapp.svg",
+        QDir::currentPath() + "/whatsapp.svg",
+        QStringLiteral("/usr/share/whatsapp-web-client/whatsapp.svg"),
+        QStringLiteral("/usr/share/pixmaps/whatsapp-web-client.svg"),
+        QStringLiteral("/usr/share/pixmaps/whatsapp.svg")
+    };
+    QIcon fallbackIcon;
+    for (const QString &path : iconCandidates) {
+        if (QFile::exists(path)) {
+            fallbackIcon = QIcon(path);
+            break;
+        }
+    }
+    QIcon appIcon = QIcon::fromTheme(QStringLiteral("whatsapp-web-client"), fallbackIcon);
+    if (!appIcon.isNull()) {
+        setWindowIcon(appIcon);
+    }
+
+    // Configurar QWebEngineView y QWebEngineProfile
+    m_browser = new QWebEngineView(this);
+    m_browser->settings()->setAttribute(QWebEngineSettings::ScrollAnimatorEnabled, true);
+    m_browser->settings()->setAttribute(QWebEngineSettings::Accelerated2dCanvasEnabled, true);
+    m_browser->settings()->setAttribute(QWebEngineSettings::WebGLEnabled, true);
+
+    m_profile = new QWebEngineProfile("WhatsAppProfile", this);
+
+    // Idioma del sistema
+    QByteArray langEnv = qgetenv("LANG");
+    if (langEnv.isEmpty()) {
+        langEnv = "en_US.UTF-8";
+    }
+    QString langStr = QString::fromUtf8(langEnv).section('.', 0, 0).replace('_', '-');
+    QString langBase = langStr.section('-', 0, 0);
+    QString acceptLang = QString("%1,%2;q=0.9,en-US;q=0.8,en;q=0.7").arg(langStr, langBase);
+    m_profile->setHttpAcceptLanguage(acceptLang);
+
+    // User-Agent de Chrome moderno en Linux
+    m_profile->setHttpUserAgent("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36");
+
+    // Almacenamiento persistente
+    QString storagePath = QDir::homePath() + "/.local/share/WhatsAppWebClient";
+    QDir().mkpath(storagePath);
+    m_profile->setPersistentStoragePath(storagePath);
+    m_profile->setPersistentCookiesPolicy(QWebEngineProfile::ForcePersistentCookies);
+
+    // Limite de cache HTTP en disco (80 MB)
+    m_profile->setHttpCacheType(QWebEngineProfile::DiskHttpCache);
+    m_profile->setHttpCacheMaximumSize(80 * 1024 * 1024);
+
+    // Corrector ortografico (solo si existen diccionarios .bdic disponibles)
+    QStringList dictDirs = {
+        QCoreApplication::applicationDirPath() + "/qtwebengine_dictionaries",
+        QStringLiteral("/usr/share/qt6/qtwebengine_dictionaries")
+    };
+    const QByteArray envDictPath = qgetenv("QTWEBENGINE_DICTIONARIES_PATH");
+    if (!envDictPath.isEmpty()) {
+        dictDirs.prepend(QString::fromLocal8Bit(envDictPath));
+    }
+    bool hasBdic = false;
+    for (const QString &dirPath : dictDirs) {
+        QDir d(dirPath);
+        if (d.exists() && !d.entryList({"*.bdic"}, QDir::Files).isEmpty()) {
+            hasBdic = true;
+            break;
+        }
+    }
+    if (hasBdic) {
+        m_profile->setSpellCheckEnabled(true);
+        m_profile->setSpellCheckLanguages({"es-ES", "en-US"});
+    } else {
+        m_profile->setSpellCheckEnabled(false);
+    }
+
+    // Inyectar controlador de privacidad para confirmaciones de lectura
+    setupReadReceiptScript();
+
+    // Configurar pagina personalizada y widget central
+    m_page = new WhatsAppPage(m_profile, m_browser);
+    m_browser->setPage(m_page);
+    setCentralWidget(m_browser);
+
+    // Permisos de notificaciones, audio y video
+    connect(m_page, &QWebEnginePage::permissionRequested, this, &WhatsAppClient::grantPermission);
+
+    // Presentador de notificaciones
+    m_profile->setNotificationPresenter([this](std::unique_ptr<QWebEngineNotification> notif) {
+        handleNotification(std::move(notif));
+    });
+
+    // Gestor de descargas (localizacion dinamica segun idioma del sistema)
+    QString baseDownloadDir = QStandardPaths::writableLocation(QStandardPaths::DownloadLocation);
+    if (baseDownloadDir.trimmed().isEmpty()) {
+        baseDownloadDir = QDir::homePath() + "/Downloads";
+    }
+    m_downloadDir = baseDownloadDir + "/WhatsApp";
+    QDir().mkpath(m_downloadDir);
+    connect(m_profile, &QWebEngineProfile::downloadRequested, this, &WhatsAppClient::handleDownload);
+
+    // Conectar carga completada para inicializar helpers de chat
+    connect(m_page, &QWebEnginePage::loadFinished, this, &WhatsAppClient::onPageLoaded);
+
+    // Gestor de notificaciones nativas DBus
+    m_notificationManager = new NotificationManager(this);
+    connect(m_notificationManager, &NotificationManager::replyReceived, this, &WhatsAppClient::sendWhatsAppMessage);
+    connect(m_notificationManager, &NotificationManager::actionDefaultInvoked, this, &WhatsAppClient::openChat);
+
+    // Cargar WhatsApp Web
+    m_browser->setUrl(QUrl("https://web.whatsapp.com"));
+
+    // Bandeja del sistema
+    m_trayIcon = new QSystemTrayIcon(this);
+    if (!appIcon.isNull()) {
+        m_trayIcon->setIcon(appIcon);
+    }
+    m_trayMenu = new QMenu(this);
+    m_trayIcon->setContextMenu(m_trayMenu);
+    connect(m_trayMenu, &QMenu::aboutToShow, this, &WhatsAppClient::buildTrayMenu);
+    connect(m_trayIcon, &QSystemTrayIcon::activated, this, &WhatsAppClient::trayActivated);
+    m_trayIcon->show();
+
+    // Controles de zoom
+    setupZoom();
+
+    // Atajos de cambio de chat (Alt+1..9, Alt+0)
+    setupChatShortcuts();
+
+    // Estado inicial
+    m_dndMode = false;
+
+    // Overlay de bloqueo
+    m_lockOverlay = new LockOverlay(this);
+    connect(m_lockOverlay, &LockOverlay::locked, this, &WhatsAppClient::onAppLocked);
+    connect(m_lockOverlay, &LockOverlay::unlocked, this, &WhatsAppClient::onAppUnlocked);
+
+    // Atajo de privacidad y bloqueo (Alt+B)
+    setupPrivacyShortcut();
+
+    // Restaurar estado de bloqueo si persistia activo
+    if (ConfigManager::hasPin() && ConfigManager::isAppLocked()) {
+        applyNativeBlur(24);
+        m_lockOverlay->lock();
+    }
+}
+
+WhatsAppClient::~WhatsAppClient() {
+    if (qApp) {
+        qApp->removeEventFilter(this);
+    }
+}
+
+void WhatsAppClient::grantPermission(QWebEnginePermission permission) {
+    permission.grant();
+}
+
+void WhatsAppClient::handleNotification(std::unique_ptr<QWebEngineNotification> notification) {
+    if (m_dndMode) {
+        return;
+    }
+
+    bool isLocked = (m_lockOverlay && m_lockOverlay->isLocked());
+    QString title = notification->title().replace('|', '-');
+    QString body;
+    if (isLocked) {
+        body = "Nuevo mensaje (WhatsApp bloqueado)";
+    } else {
+        body = notification->message().replace('\n', ' ').replace('|', '-');
+    }
+
+    QString iconPath;
+    QImage iconImg = notification->icon();
+    if (!iconImg.isNull()) {
+        QString tempDir = QDir::tempPath() + "/wa_icons";
+        QDir().mkpath(tempDir);
+        QString safeTitle;
+        for (const QChar &c : title) {
+            if (c.isLetterOrNumber() || c == ' ' || c == '.' || c == '_' || c == '-') {
+                safeTitle.append(c);
+            }
+        }
+        if (safeTitle.isEmpty()) {
+            safeTitle = "notification_icon";
+        }
+        iconPath = QString("%1/%2.png").arg(tempDir, safeTitle);
+        iconImg.save(iconPath, "PNG");
+    }
+
+    updateRecentChat(title, body);
+
+    if (m_notificationManager) {
+        m_notificationManager->sendNotification(title, body, iconPath);
+    }
+}
+
+void WhatsAppClient::handleDownload(QWebEngineDownloadRequest *download) {
+    QString suggested = download->suggestedFileName();
+    if (suggested.isEmpty()) {
+        suggested = download->downloadFileName();
+    }
+    if (suggested.isEmpty()) {
+        suggested = "download";
+    }
+
+    QFileInfo initialInfo(m_downloadDir + "/" + suggested);
+    QString base = initialInfo.completeBaseName();
+    QString ext = initialInfo.suffix();
+    if (!ext.isEmpty()) {
+        ext = "." + ext;
+    }
+
+    QString savePath = m_downloadDir + "/" + suggested;
+    int counter = 1;
+    while (QFile::exists(savePath)) {
+        savePath = QString("%1/%2 (%3)%4").arg(m_downloadDir, base, QString::number(counter), ext);
+        counter++;
+    }
+
+    QFileInfo finalInfo(savePath);
+    m_activeDownloads.insert(download);
+    download->setDownloadDirectory(m_downloadDir);
+    download->setDownloadFileName(finalInfo.fileName());
+    download->accept();
+
+    connect(download, &QWebEngineDownloadRequest::isFinishedChanged, this, [this, download]() {
+        onDownloadFinished(download);
+    });
+}
+
+void WhatsAppClient::onDownloadFinished(QWebEngineDownloadRequest *download) {
+    if (!download->isFinished()) {
+        return;
+    }
+
+    m_activeDownloads.remove(download);
+
+    QString fileName = download->downloadFileName();
+    QString filePath = download->downloadDirectory() + "/" + fileName;
+
+    QString sizeMb = "?";
+    QFileInfo fi(filePath);
+    if (fi.exists()) {
+        double mb = static_cast<double>(fi.size()) / (1024.0 * 1024.0);
+        sizeMb = QString::number(mb, 'f', 1);
+    }
+
+    QString timeStr = QTime::currentTime().toString("HH:mm");
+
+    DownloadRecord record;
+    record.fileName = fileName;
+    record.path = filePath;
+    record.sizeMb = sizeMb;
+    record.time = timeStr;
+    m_sessionDownloads.append(record);
+
+    showDownloadNotification(fileName, filePath, sizeMb);
+}
+
+void WhatsAppClient::showDownloadNotification(const QString &fileName, const QString &filePath, const QString &sizeMb) {
+    Q_UNUSED(filePath);
+    if (m_dndMode) {
+        return;
+    }
+    m_trayIcon->showMessage(
+        "Descarga completada",
+        QString("%1 (%2 MB)").arg(fileName, sizeMb),
+        QSystemTrayIcon::Information,
+        4000
+    );
+}
+
+void WhatsAppClient::buildTrayMenu() {
+    m_trayMenu->clear();
+
+    if (m_recentChats.isEmpty()) {
+        scrapeRecentChats();
+    }
+
+    if (!m_recentChats.isEmpty()) {
+        QMenu *chatsMenu = m_trayMenu->addMenu("Chats recientes");
+        for (const RecentChat &chat : m_recentChats) {
+            QString label = chat.name;
+            if (!chat.lastMsg.isEmpty()) {
+                label += QString("  ·  %1").arg(chat.lastMsg);
+            }
+            QAction *action = chatsMenu->addAction(label);
+            QString chatName = chat.name;
+            connect(action, &QAction::triggered, this, [this, chatName]() {
+                openChat(chatName);
+            });
+        }
+        m_trayMenu->addSeparator();
+    }
+
+    if (!m_sessionDownloads.isEmpty()) {
+        QMenu *downloadsMenu = m_trayMenu->addMenu(QString("Descargas (%1)").arg(m_sessionDownloads.size()));
+        int start = qMax(0, m_sessionDownloads.size() - 15);
+        for (int i = m_sessionDownloads.size() - 1; i >= start; --i) {
+            const DownloadRecord &dl = m_sessionDownloads[i];
+            QString label = QString("%1  (%2 MB · %3)").arg(dl.fileName, dl.sizeMb, dl.time);
+            QAction *dlAction = downloadsMenu->addAction(label);
+            QString dlPath = dl.path;
+            connect(dlAction, &QAction::triggered, this, [dlPath]() {
+                QDesktopServices::openUrl(QUrl::fromLocalFile(dlPath));
+            });
+        }
+
+        downloadsMenu->addSeparator();
+        QAction *openFolderAction = downloadsMenu->addAction("Abrir carpeta de descargas");
+        QString dir = m_downloadDir;
+        connect(openFolderAction, &QAction::triggered, this, [dir]() {
+            QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+        });
+
+        m_trayMenu->addSeparator();
+    }
+
+    QAction *showAction = m_trayMenu->addAction("Mostrar");
+    connect(showAction, &QAction::triggered, this, &WhatsAppClient::show);
+
+    QAction *dndAction = m_trayMenu->addAction("Modo no molestar");
+    dndAction->setCheckable(true);
+    dndAction->setChecked(m_dndMode);
+    connect(dndAction, &QAction::triggered, this, &WhatsAppClient::toggleDndMode);
+
+    QAction *privacyAction = m_trayMenu->addAction("Modo privacidad");
+    connect(privacyAction, &QAction::triggered, this, &WhatsAppClient::toggleQuickPrivacy);
+
+    QAction *lockAction = m_trayMenu->addAction("Bloquear app");
+    connect(lockAction, &QAction::triggered, this, &WhatsAppClient::lockApp);
+
+    QAction *pinConfigAction = m_trayMenu->addAction("Configurar PIN");
+    connect(pinConfigAction, &QAction::triggered, this, &WhatsAppClient::openPinConfig);
+
+    bool isLocked = (m_lockOverlay && m_lockOverlay->isLocked());
+    if (!isLocked) {
+        QAction *quitAction = m_trayMenu->addAction("Salir");
+        connect(quitAction, &QAction::triggered, qApp, &QCoreApplication::quit);
+    }
+}
+
+void WhatsAppClient::trayActivated(QSystemTrayIcon::ActivationReason reason) {
+    if (reason == QSystemTrayIcon::Trigger) {
+        if (isHidden()) {
+            show();
+            activateWindow();
+        } else {
+            hide();
+        }
+    }
+}
+
+void WhatsAppClient::closeEvent(QCloseEvent *event) {
+    event->ignore();
+    hide();
+}
+
+void WhatsAppClient::hideEvent(QHideEvent *event) {
+    QMainWindow::hideEvent(event);
+    if (m_browser && m_browser->page()) {
+        // Reducir consumo de recursos al ocultar
+    }
+}
+
+void WhatsAppClient::showEvent(QShowEvent *event) {
+    QMainWindow::showEvent(event);
+    if (m_browser && m_browser->page()) {
+        m_browser->page()->setLifecycleState(QWebEnginePage::LifecycleState::Active);
+    }
+    if (m_browser) {
+        m_browser->installEventFilter(this);
+        if (m_browser->focusProxy()) {
+            m_browser->focusProxy()->installEventFilter(this);
+        }
+        for (QObject *child : m_browser->children()) {
+            if (child->isWidgetType()) {
+                child->installEventFilter(this);
+            }
+        }
+    }
+}
+
+void WhatsAppClient::resizeEvent(QResizeEvent *event) {
+    QMainWindow::resizeEvent(event);
+    if (m_lockOverlay) {
+        m_lockOverlay->setGeometry(rect());
+    }
+}
+
+void WhatsAppClient::wheelEvent(QWheelEvent *event) {
+    Qt::KeyboardModifiers mods = event->modifiers();
+    Qt::KeyboardModifiers appMods = QApplication::keyboardModifiers();
+    bool altPressed = m_altKeyDown ||
+                      (mods & Qt::AltModifier) || 
+                      (appMods & Qt::AltModifier) || 
+                      (mods & Qt::GroupSwitchModifier) || 
+                      (appMods & Qt::GroupSwitchModifier);
+
+    if (altPressed) {
+        int delta = event->angleDelta().y();
+        if (delta == 0) {
+            delta = event->angleDelta().x();
+        }
+        if (delta == 0 && !event->pixelDelta().isNull()) {
+            delta = event->pixelDelta().y();
+            if (delta == 0) {
+                delta = event->pixelDelta().x();
+            }
+        }
+        if (delta > 0) {
+            navigateChatByOffset(-1);
+        } else if (delta < 0) {
+            navigateChatByOffset(1);
+        }
+        event->accept();
+        return;
+    }
+    if ((mods & Qt::ControlModifier) || (appMods & Qt::ControlModifier)) {
+        int delta = event->angleDelta().y();
+        if (delta > 0) {
+            zoomIn();
+        } else if (delta < 0) {
+            zoomOut();
+        }
+        event->accept();
+    } else {
+        QMainWindow::wheelEvent(event);
+    }
+}
+
+void WhatsAppClient::setupPrivacyShortcut() {
+    m_quickPrivacyMode = false;
+    m_altBDown = false;
+    m_altBHoldTriggered = false;
+
+    m_altBHoldTimer = new QTimer(this);
+    m_altBHoldTimer->setSingleShot(true);
+    m_altBHoldTimer->setInterval(500);
+    connect(m_altBHoldTimer, &QTimer::timeout, this, &WhatsAppClient::onAltBHeld);
+
+    if (qApp) {
+        qApp->installEventFilter(this);
+    }
+}
+
+bool WhatsAppClient::isPrivacyActive() const {
+    if (m_quickPrivacyMode) {
+        return true;
+    }
+    if (m_lockOverlay && m_lockOverlay->isLocked()) {
+        return true;
+    }
+    return false;
+}
+
+bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
+    if (QApplication::activeModalWidget() != nullptr) {
+        return QMainWindow::eventFilter(obj, event);
+    }
+
+    QEvent::Type etype = event->type();
+
+    // Solo la desactivacion real de la ventana oculta los badges. Los FocusOut internos
+    // entre sub-widgets de Qt WebEngine (recibidos via qApp) no deben ocultarlos/recrearlos.
+    if (etype == QEvent::WindowDeactivate && obj == this) {
+        m_wheelAccumulatedDelta = 0;
+        if (m_altKeyDown) {
+            m_altKeyDown = false;
+            hideChatBadges();
+        }
+    }
+
+    if (etype == QEvent::Wheel) {
+        if (m_lockOverlay && m_lockOverlay->isLocked()) {
+            return true;
+        }
+        if (m_quickPrivacyMode) {
+            return true;
+        }
+
+        auto *wheelEv = static_cast<QWheelEvent *>(event);
+        Qt::KeyboardModifiers mods = wheelEv->modifiers();
+        Qt::KeyboardModifiers appMods = QApplication::keyboardModifiers();
+        bool altPressed = m_altKeyDown ||
+                          (mods & Qt::AltModifier) || 
+                          (appMods & Qt::AltModifier) || 
+                          (mods & Qt::GroupSwitchModifier) || 
+                          (appMods & Qt::GroupSwitchModifier);
+
+        if (altPressed) {
+            int delta = wheelEv->angleDelta().y();
+            if (delta == 0) {
+                delta = wheelEv->angleDelta().x();
+            }
+            if (delta == 0 && !wheelEv->pixelDelta().isNull()) {
+                delta = wheelEv->pixelDelta().y();
+                if (delta == 0) {
+                    delta = wheelEv->pixelDelta().x();
+                }
+            }
+
+            if (delta != 0) {
+                if ((delta > 0 && m_wheelAccumulatedDelta < 0) || (delta < 0 && m_wheelAccumulatedDelta > 0)) {
+                    m_wheelAccumulatedDelta = 0;
+                }
+
+                m_wheelAccumulatedDelta += delta;
+                const int stepThreshold = 40;
+
+                if (m_wheelAccumulatedDelta >= stepThreshold) {
+                    m_wheelAccumulatedDelta = 0;
+                    navigateChatByOffset(-1); // Rueda arriba -> Chat anterior
+                } else if (m_wheelAccumulatedDelta <= -stepThreshold) {
+                    m_wheelAccumulatedDelta = 0;
+                    navigateChatByOffset(1);  // Rueda abajo -> Chat siguiente
+                }
+            }
+            wheelEv->accept();
+            return true;
+        }
+
+        if ((mods & Qt::ControlModifier) || (appMods & Qt::ControlModifier)) {
+            int delta = wheelEv->angleDelta().y();
+            if (delta > 0) {
+                zoomIn();
+            } else if (delta < 0) {
+                zoomOut();
+            }
+            wheelEv->accept();
+            return true;
+        }
+    }
+
+    if (etype == QEvent::KeyPress) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        if (keyEvent->key() == Qt::Key_B && (keyEvent->modifiers() & Qt::AltModifier)) {
+            if (keyEvent->isAutoRepeat()) {
+                return true;
+            }
+
+            m_altKeyDown = false;
+            hideChatBadges();
+
+            if (m_lockOverlay && m_lockOverlay->isLocked()) {
+                if (m_lockOverlay->pinInput()) {
+                    m_lockOverlay->pinInput()->setFocus();
+                } else {
+                    m_lockOverlay->setFocus();
+                }
+                return true;
+            }
+
+            m_altBDown = true;
+            m_altBHoldTriggered = false;
+            m_altBHoldTimer->start();
+            return true;
+        }
+
+        if ((keyEvent->key() == Qt::Key_Alt || keyEvent->key() == Qt::Key_AltGr) && !keyEvent->isAutoRepeat()) {
+            // El mismo KeyPress llega a varios filtros (qApp, m_browser, focusProxy, hijos):
+            // solo la primera transicion a "presionado" muestra los badges.
+            if (!m_altKeyDown) {
+                m_altKeyDown = true;
+                if (!isPrivacyActive()) {
+                    showChatBadges();
+                }
+            }
+        }
+    } else if (etype == QEvent::KeyRelease) {
+        auto *keyEvent = static_cast<QKeyEvent *>(event);
+        if (m_altBDown && (keyEvent->key() == Qt::Key_B || keyEvent->key() == Qt::Key_Alt || keyEvent->key() == Qt::Key_AltGr)) {
+            if (keyEvent->isAutoRepeat()) {
+                return true;
+            }
+
+            if (m_altBHoldTimer->isActive()) {
+                m_altBHoldTimer->stop();
+                toggleQuickPrivacy();
+            }
+
+            m_altBDown = false;
+            m_altBHoldTriggered = false;
+            if (keyEvent->key() == Qt::Key_Alt || keyEvent->key() == Qt::Key_AltGr) {
+                m_altKeyDown = false;
+            }
+            return true;
+        }
+
+        if ((keyEvent->key() == Qt::Key_Alt || keyEvent->key() == Qt::Key_AltGr) && !keyEvent->isAutoRepeat()) {
+            m_wheelAccumulatedDelta = 0;
+            if (m_altKeyDown) {
+                m_altKeyDown = false;
+                hideChatBadges();
+            }
+        }
+    }
+
+    if (m_quickPrivacyMode) {
+        switch (etype) {
+        case QEvent::KeyPress:
+        case QEvent::KeyRelease:
+        case QEvent::MouseButtonPress:
+        case QEvent::MouseButtonRelease:
+        case QEvent::MouseButtonDblClick:
+        case QEvent::MouseMove:
+        case QEvent::Wheel:
+        case QEvent::ContextMenu:
+        case QEvent::InputMethod:
+        case QEvent::ShortcutOverride:
+            return true;
+        default:
+            break;
+        }
+    }
+
+    return QMainWindow::eventFilter(obj, event);
+}
+
+void WhatsAppClient::onAltBHeld() {
+    m_altBHoldTriggered = true;
+    lockApp();
+}
+
+void WhatsAppClient::showPrivacyInstructionsIfNeeded(const QString &mode) {
+    QSettings settings("WhatsAppWebClient", "WhatsAppWebClient");
+    if (settings.value("hide_privacy_instructions", false).toBool()) {
+        return;
+    }
+    PrivacyInstructionDialog dialog(this, mode);
+    dialog.exec();
+}
+
+void WhatsAppClient::toggleQuickPrivacy() {
+    if (m_lockOverlay && m_lockOverlay->isLocked()) {
+        return;
+    }
+
+    m_quickPrivacyMode = !m_quickPrivacyMode;
+    if (m_quickPrivacyMode) {
+        applyNativeBlur(18);
+        QTimer::singleShot(150, this, [this]() {
+            showPrivacyInstructionsIfNeeded("privacy");
+        });
+    } else {
+        removeNativeBlur();
+    }
+}
+
+void WhatsAppClient::lockApp() {
+    show();
+    activateWindow();
+    m_quickPrivacyMode = false;
+    if (m_lockOverlay) {
+        m_lockOverlay->lock();
+    }
+    QTimer::singleShot(150, this, [this]() {
+        showPrivacyInstructionsIfNeeded("lock");
+    });
+}
+
+void WhatsAppClient::onAppLocked() {
+    applyNativeBlur(24);
+}
+
+void WhatsAppClient::onAppUnlocked() {
+    removeNativeBlur();
+    m_quickPrivacyMode = false;
+    m_browser->setFocus();
+}
+
+void WhatsAppClient::applyNativeBlur(int radius) {
+    if (m_browser && m_browser->graphicsEffect()) {
+        m_browser->setGraphicsEffect(nullptr);
+    }
+    if (!m_browser || !m_browser->page()) {
+        return;
+    }
+
+    QString js = QString(R"JS(
+        (function() {
+            var overlay = document.getElementById('wa-privacy-blur-overlay');
+            if (!overlay) {
+                overlay = document.createElement('div');
+                overlay.id = 'wa-privacy-blur-overlay';
+                document.body.appendChild(overlay);
+            }
+            if (overlay) {
+                overlay.style.cssText = 'position: fixed !important; ' +
+                    'top: -50px !important; left: -50px !important; ' +
+                    'right: -50px !important; bottom: -50px !important; ' +
+                    'backdrop-filter: blur(%1px) !important; ' +
+                    '-webkit-backdrop-filter: blur(%1px) !important; ' +
+                    'background: rgba(11, 20, 26, 0.35) !important; ' +
+                    'z-index: 999999 !important; ' +
+                    'pointer-events: all !important; ' +
+                    'user-select: none !important;';
+            }
+            var oldStyle = document.getElementById('wa-privacy-blur-style');
+            if (oldStyle) {
+                oldStyle.remove();
+            }
+        })();
+    )JS").arg(radius);
+
+    m_browser->page()->runJavaScript(js);
+}
+
+void WhatsAppClient::removeNativeBlur() {
+    if (m_browser && m_browser->graphicsEffect()) {
+        m_browser->setGraphicsEffect(nullptr);
+    }
+    if (!m_browser || !m_browser->page()) {
+        return;
+    }
+
+    QString js = R"JS(
+        (function() {
+            var overlay = document.getElementById('wa-privacy-blur-overlay');
+            if (overlay) {
+                overlay.remove();
+            }
+            var oldStyle = document.getElementById('wa-privacy-blur-style');
+            if (oldStyle) {
+                oldStyle.remove();
+            }
+        })();
+    )JS";
+
+    m_browser->page()->runJavaScript(js);
+}
+
+void WhatsAppClient::openPinConfig() {
+    PinConfigDialog dialog(this);
+    dialog.exec();
+}
+
+void WhatsAppClient::toggleDndMode(bool checked) {
+    m_dndMode = checked;
+    if (m_browser && m_browser->page()) {
+        m_browser->page()->setAudioMuted(m_dndMode);
+    }
+}
+
+void WhatsAppClient::setupChatShortcuts() {
+    for (int i = 0; i < 10; ++i) {
+        QAction *action = new QAction(this);
+        action->setShortcut(QKeySequence(QString("Alt+%1").arg(i)));
+        int chatIndex = (i == 0) ? 9 : (i - 1);
+        connect(action, &QAction::triggered, this, [this, chatIndex]() {
+            switchToChatByIndex(chatIndex);
+        });
+        addAction(action);
+    }
+
+    // Atajo para alternar el modo compacto de la barra lateral (Alt+M)
+    QAction *toggleCompactAction = new QAction(this);
+    toggleCompactAction->setShortcut(QKeySequence("Alt+M"));
+    connect(toggleCompactAction, &QAction::triggered, this, &WhatsAppClient::toggleSidebarCompact);
+    addAction(toggleCompactAction);
+}
+
+QString WhatsAppClient::getInitChatHelpersJs() const {
+    return QString::fromUtf8(R"JS(
+(function() {
+    // 1. Inyectar estilos CSS para scrollbar y badges de atajos
+    if (!document.getElementById('wa-alt-badge-styles')) {
+        var style = document.createElement('style');
+        style.id = 'wa-alt-badge-styles';
+        style.textContent = `
+            ::-webkit-scrollbar { width: 6px !important; height: 6px !important; }
+            ::-webkit-scrollbar-track { background: transparent !important; }
+            ::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, 0.25) !important; border-radius: 3px !important; }
+            ::-webkit-scrollbar-thumb:hover { background: rgba(128, 128, 128, 0.45) !important; }
+            .wa-alt-badge {
+                position: absolute !important;
+                display: flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                width: 20px !important;
+                height: 20px !important;
+                line-height: 1 !important;
+                text-align: center !important;
+                font-size: 11px !important;
+                font-weight: 800 !important;
+                font-family: 'Segoe UI', system-ui, -apple-system, sans-serif !important;
+                color: #ffffff !important;
+                background: #00a884 !important;
+                border: 2px solid #ffffff !important;
+                border-radius: 50% !important;
+                pointer-events: none !important;
+                z-index: 999999 !important;
+                box-shadow: 0 2px 6px rgba(0, 0, 0, 0.5) !important;
+                box-sizing: border-box !important;
+                padding: 0 0 2px 0 !important;
+                margin: 0 !important;
+                animation: wa-badge-pop 0.1s cubic-bezier(0.175, 0.885, 0.32, 1.275) !important;
+            }
+            @keyframes wa-badge-pop {
+                0% { transform: scale(0.3); opacity: 0; }
+                100% { transform: scale(1); opacity: 1; }
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    // 2. Funcion para obtener chats validos ignorando completamente la pestana de Archivados
+    // y capturando todas las conversaciones visibles (fijadas, propias y normales) en su orden visual exacto.
+    window.__waGetValidChats = function() {
+        var pane = document.getElementById('pane-side');
+        if (!pane) return [];
+
+        var rawList = [];
+
+        // Estrategia A: Filas accesibles con role="row" o role="listitem"
+        var roleNodes = pane.querySelectorAll('[role="row"], [role="listitem"]');
+        for (var r = 0; r < roleNodes.length; r++) {
+            var node = roleNodes[r];
+            var h = node.offsetHeight || node.getBoundingClientRect().height;
+            // Descartar contenedores globales y elementos vacios (altura tipica de fila: 40px a 140px)
+            if (h >= 40 && h <= 140) {
+                if (rawList.indexOf(node) === -1) {
+                    rawList.push(node);
+                }
+            }
+        }
+
+        // Estrategia B: Celdas de la lista virtualizada con transform translateY o translate3d
+        var virtualNodes = pane.querySelectorAll('div[style*="translateY"], div[style*="translate3d"]');
+        for (var v = 0; v < virtualNodes.length; v++) {
+            var vNode = virtualNodes[v];
+            var vh = vNode.offsetHeight || vNode.getBoundingClientRect().height;
+            if (vh >= 40 && vh <= 140) {
+                var semRow = vNode.querySelector('[role="row"], [role="listitem"]') || vNode;
+                if (rawList.indexOf(semRow) === -1 && rawList.indexOf(vNode) === -1) {
+                    rawList.push(semRow);
+                }
+            }
+        }
+
+        // Estrategia C: Fallback para estructuras con cell-frame-container
+        if (!rawList.length) {
+            var cellFrames = pane.querySelectorAll('div[data-testid="cell-frame-container"]');
+            for (var c = 0; c < cellFrames.length; c++) {
+                var cf = cellFrames[c];
+                var row = cf.closest('[role="row"], [role="listitem"]') || cf;
+                if (rawList.indexOf(row) === -1) {
+                    rawList.push(row);
+                }
+            }
+        }
+
+        // Deduplicacion jerarquica (evitar que un contenedor padre y su hijo figuren a la vez)
+        var dedupedList = [];
+        for (var i = 0; i < rawList.length; i++) {
+            var item = rawList[i];
+            var isContained = false;
+            for (var j = 0; j < rawList.length; j++) {
+                if (i !== j && rawList[j].contains(item)) {
+                    isContained = true;
+                    break;
+                }
+            }
+            if (!isContained && dedupedList.indexOf(item) === -1) {
+                dedupedList.push(item);
+            }
+        }
+
+        var validChats = [];
+        for (var k = 0; k < dedupedList.length; k++) {
+            var el = dedupedList[k];
+
+            // Deteccion de chat anclado / fijado (pin):
+            // Si contiene el icono de fijado, es obligatoriamente un chat valido y NUNCA debe descartarse como archivado
+            var isPinned = el.querySelector('span[data-icon*="pin"], [data-testid*="pin"]') !== null;
+
+            if (!isPinned) {
+                // Filtrar si es la fila de Archivados por icono de archivado
+                var hasArchiveIcon = el.querySelector('span[data-icon*="archive"], [data-testid*="archive"]') !== null;
+                if (hasArchiveIcon) {
+                    continue;
+                }
+
+                // Filtrar por texto si coincide con Archivados/Archived/Arquivadas
+                var titleEl = el.querySelector('span[title], div[data-testid="cell-frame-title"] span, span[dir="auto"]');
+                var title = titleEl ? (titleEl.getAttribute('title') || titleEl.innerText || titleEl.textContent || '').trim().toLowerCase() : '';
+                if (/^(archivados|archived|arquivadas)/i.test(title)) {
+                    continue;
+                }
+
+                var fullText = (el.innerText || el.textContent || '').trim().toLowerCase();
+                if (/^(archivados|archived|arquivadas)(\s*\d+)?$/i.test(fullText)) {
+                    continue;
+                }
+            }
+
+            // Verificar que contiene la estructura minima de un chat real (avatar o contenido de texto)
+            var hasChatContent = el.querySelector('img') || 
+                                 el.querySelector('svg') || 
+                                 el.querySelector('span[data-icon]') ||
+                                 el.querySelector('span[title]') || 
+                                 el.querySelector('span[dir="auto"]') ||
+                                 el.querySelector('div[data-testid*="cell-frame"]');
+            if (!hasChatContent) {
+                continue;
+            }
+
+            validChats.push(el);
+        }
+
+        // Ordenar visualmente de arriba a abajo por coordenada Y para que el primer chat visible sea siempre el indice 0
+        validChats.sort(function(a, b) {
+            return a.getBoundingClientRect().top - b.getBoundingClientRect().top;
+        });
+
+        return validChats;
+    };
+
+    // 3. Funcion para mostrar badges sobre la esquina de la foto de perfil sin depender de cell-frame-container
+    window.__waShowAltBadges = function() {
+        // Reutiliza los badges existentes: solo crea (con animacion) los que faltan,
+        // actualiza posicion/etiqueta de los ya visibles y elimina los sobrantes.
+        var validChats = window.__waGetValidChats();
+        var count = Math.min(validChats.length, 10);
+        var keep = [];
+
+        for (var i = 0; i < count; i++) {
+            var keyLabel = (i < 9) ? String(i + 1) : '0';
+            var chatRow = validChats[i];
+
+            var rowRect = chatRow.getBoundingClientRect();
+            if (!rowRect.width || !rowRect.height) continue;
+
+            var candidate = null;
+
+            // 1. Imagen de perfil directa en cualquier parte de la fila
+            var imgs = chatRow.querySelectorAll('img');
+            for (var m = 0; m < imgs.length; m++) {
+                var imgRect = imgs[m].getBoundingClientRect();
+                if (imgRect.width >= 30 && imgRect.height >= 30) {
+                    candidate = imgs[m];
+                    break;
+                }
+            }
+
+            // 2. Anillo de historia o boton de avatar circular
+            if (!candidate) {
+                var buttons = chatRow.querySelectorAll('div[role="button"]');
+                for (var b = 0; b < buttons.length; b++) {
+                    var btnRect = buttons[b].getBoundingClientRect();
+                    // El avatar siempre esta ubicado en el tercio izquierdo de la fila
+                    if (btnRect.width >= 35 && btnRect.height >= 35 && (btnRect.left - rowRect.left) < 75) {
+                        candidate = buttons[b];
+                        break;
+                    }
+                }
+            }
+
+            // 3. Icono o SVG de avatar (contactos o chats propios sin foto de perfil personalizada)
+            if (!candidate) {
+                var icons = chatRow.querySelectorAll('span[data-icon="default-user"], span[data-icon="community-outline"], span[data-icon*="avatar"], svg');
+                for (var ic = 0; ic < icons.length; ic++) {
+                    var icRect = icons[ic].getBoundingClientRect();
+                    if ((icRect.left - rowRect.left) < 75 && icRect.width >= 20) {
+                        var pDiv = icons[ic].closest('div');
+                        if (pDiv && chatRow.contains(pDiv) && pDiv.getBoundingClientRect().width >= 30) {
+                            candidate = pDiv;
+                        } else {
+                            candidate = icons[ic];
+                        }
+                        break;
+                    }
+                }
+            }
+
+            // 4. Busqueda por dimensiones tipicas de avatar en la columna izquierda
+            if (!candidate) {
+                var descendants = chatRow.querySelectorAll('div, span');
+                for (var d = 0; d < descendants.length; d++) {
+                    var rect = descendants[d].getBoundingClientRect();
+                    if (rect.width >= 35 && rect.width <= 65 && rect.height >= 35 && rect.height <= 65 && (rect.left - rowRect.left) < 75) {
+                        candidate = descendants[d];
+                        break;
+                    }
+                }
+            }
+
+            var cx, cy;
+            var candRadius = 24.5;
+            if (candidate) {
+                var candRect = candidate.getBoundingClientRect();
+                cx = (candRect.left - rowRect.left) + (candRect.width / 2);
+                cy = (candRect.top - rowRect.top) + (candRect.height / 2);
+                candRadius = Math.min(candRect.width, candRect.height) / 2;
+            } else {
+                // Fallback geometrico: en modo compacto se centra en rowRect.width / 2; en modo normal cx = 36.5
+                cx = (rowRect.width <= 85) ? (rowRect.width / 2) : 36.5;
+                cy = rowRect.height / 2;
+            }
+
+            var badgeTop = Math.round(cy - candRadius - 3);
+            var badgeLeft = Math.round(cx - candRadius - 3);
+
+            // Clamping estricto para evitar recorte en los limites de la fila 0 de #pane-side
+            badgeTop = Math.max(2, badgeTop);
+            badgeLeft = Math.max(2, badgeLeft);
+
+            if (getComputedStyle(chatRow).position === 'static') {
+                chatRow.style.position = 'relative';
+            }
+            chatRow.style.setProperty('overflow', 'visible', 'important');
+
+            var badge = null;
+            for (var cb = 0; cb < chatRow.children.length; cb++) {
+                if (chatRow.children[cb].classList && chatRow.children[cb].classList.contains('wa-alt-badge')) {
+                    badge = chatRow.children[cb];
+                    break;
+                }
+            }
+            if (!badge) {
+                badge = document.createElement('span');
+                badge.className = 'wa-alt-badge';
+                chatRow.appendChild(badge);
+            }
+            if (badge.textContent !== keyLabel) badge.textContent = keyLabel;
+            badge.style.top = badgeTop + 'px';
+            badge.style.left = badgeLeft + 'px';
+            keep.push(badge);
+        }
+
+        document.querySelectorAll('.wa-alt-badge').forEach(function(el) {
+            if (keep.indexOf(el) === -1) el.remove();
+        });
+    };
+
+    // 4. Funcion para ocultar badges
+    window.__waHideAltBadges = function() {
+        document.querySelectorAll('.wa-alt-badge').forEach(function(el) { el.remove(); });
+    };
+
+    // 5. Funcion unificada de seleccion y clic simulado 100% compatible con React 18
+    window.__waSelectChatElement = function(target) {
+        if (!target) return;
+
+        // Priorizar el texto del nombre del chat (span[title], div[data-testid="cell-frame-title"], span[dir="auto"])
+        // verificando que sea visible; si no es visible (como en modo compacto), clicar el contenedor de la fila
+        var clickCandidate = target.querySelector('span[title]') || 
+                              target.querySelector('div[data-testid="cell-frame-title"] span') || 
+                              target.querySelector('div[data-testid="cell-frame-title"]') || 
+                              target.querySelector('span[dir="auto"]') || 
+                              target.querySelector('[role="gridcell"]:not(:first-child)');
+
+        var clickTarget = target;
+        if (clickCandidate) {
+            var cRect = clickCandidate.getBoundingClientRect();
+            var cStyle = window.getComputedStyle(clickCandidate);
+            if (cRect.width > 0 && cRect.height > 0 && cStyle.display !== 'none' && cStyle.visibility !== 'hidden') {
+                clickTarget = clickCandidate;
+            }
+        }
+
+        var rect = clickTarget.getBoundingClientRect();
+        var clientX = Math.round(rect.left + (rect.width > 0 ? rect.width / 2 : 10));
+        var clientY = Math.round(rect.top + (rect.height > 0 ? rect.height / 2 : 10));
+
+        var commonOpts = {
+            bubbles: true,
+            cancelable: true,
+            view: window,
+            composed: true,
+            clientX: clientX,
+            clientY: clientY,
+            screenX: clientX,
+            screenY: clientY
+        };
+
+        var downOpts = Object.assign({}, commonOpts, { button: 0, buttons: 1 });
+        if (window.PointerEvent) {
+            clickTarget.dispatchEvent(new PointerEvent('pointerdown', Object.assign({}, downOpts, {
+                pointerId: 1,
+                pointerType: 'mouse',
+                isPrimary: true
+            })));
+        }
+        clickTarget.dispatchEvent(new MouseEvent('mousedown', downOpts));
+
+        if (typeof target.focus === 'function') {
+            try { target.focus(); } catch (e) {}
+        }
+
+        var upOpts = Object.assign({}, commonOpts, { button: 0, buttons: 0 });
+        if (window.PointerEvent) {
+            clickTarget.dispatchEvent(new PointerEvent('pointerup', Object.assign({}, upOpts, {
+                pointerId: 1,
+                pointerType: 'mouse',
+                isPrimary: true
+            })));
+        }
+        clickTarget.dispatchEvent(new MouseEvent('mouseup', upOpts));
+        clickTarget.dispatchEvent(new MouseEvent('click', upOpts));
+
+        if (typeof clickTarget.click === 'function') {
+            try { clickTarget.click(); } catch (e) {}
+        }
+
+        if (typeof target.scrollIntoView === 'function') {
+            target.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+        }
+    };
+
+    // 6. Obtener el indice del chat seleccionado actualmente
+    window.__waGetCurrentChatIndex = function() {
+        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats() : [];
+        if (!validChats.length) return -1;
+
+        // 1. Prioridad: atributo aria-selected en la fila o sus hijos
+        for (var i = 0; i < validChats.length; i++) {
+            var row = validChats[i];
+            if (row.getAttribute('aria-selected') === 'true' || 
+                row.querySelector('[aria-selected="true"]') !== null) {
+                return i;
+            }
+        }
+
+        // 2. Coincidencia por titulo activo en el header de #main (con normalizacion de sufijos como Tu/You)
+        var mainHeader = document.querySelector('#main header');
+        if (mainHeader) {
+            var titleEl = mainHeader.querySelector('span[title]') || 
+                          mainHeader.querySelector('div[data-testid="conversation-info-header"] span[title]') ||
+                          mainHeader.querySelector('div[role="button"] span[dir="auto"]') ||
+                          mainHeader.querySelector('span[dir="auto"]');
+            if (titleEl) {
+                var rawActiveTitle = (titleEl.getAttribute('title') || titleEl.innerText || titleEl.textContent || '').trim().toLowerCase();
+                var activeTitle = rawActiveTitle.replace(/\s*\((tú|you|tu)\)\s*/gi, '').trim();
+                if (activeTitle) {
+                    for (var j = 0; j < validChats.length; j++) {
+                        var rTitle = validChats[j].querySelector('span[title]') || 
+                                     validChats[j].querySelector('div[data-testid="cell-frame-title"] span') || 
+                                     validChats[j].querySelector('span[dir="auto"]');
+                        if (rTitle) {
+                            var rawChatTitle = (rTitle.getAttribute('title') || rTitle.innerText || rTitle.textContent || '').trim().toLowerCase();
+                            var chatTitle = rawChatTitle.replace(/\s*\((tú|you|tu)\)\s*/gi, '').trim();
+                            if (chatTitle && (chatTitle === activeTitle || rawChatTitle === rawActiveTitle)) {
+                                return j;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 3. Fallback al indice cacheado
+        if (typeof window.__waCurrentChatIndex === 'number' && 
+            window.__waCurrentChatIndex >= 0 && 
+            window.__waCurrentChatIndex < validChats.length) {
+            return window.__waCurrentChatIndex;
+        }
+
+        return -1;
+    };
+
+    // 7. Navegacion secuencial por chats (+1 abajo, -1 arriba)
+    window.__waNavigateChat = function(offset) {
+        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats() : [];
+        if (!validChats.length) return -1;
+
+        var currentIndex = window.__waGetCurrentChatIndex();
+        var targetIndex = 0;
+
+        if (currentIndex === -1) {
+            targetIndex = (offset > 0) ? 0 : 0;
+        } else {
+            targetIndex = currentIndex + offset;
+            if (targetIndex < 0) {
+                targetIndex = 0;
+            } else if (targetIndex >= validChats.length) {
+                targetIndex = validChats.length - 1;
+            }
+        }
+
+        if (targetIndex === currentIndex && currentIndex !== -1) {
+            return targetIndex;
+        }
+
+        window.__waCurrentChatIndex = targetIndex;
+        window.__waHasRepliedInCurrentChat = false;
+        window.__waMarkingSeenActive = false;
+        if (window.__waCancelTemporarySeen) {
+            window.__waCancelTemporarySeen();
+        }
+
+        var target = validChats[targetIndex];
+        if (target && window.__waSelectChatElement) {
+            window.__waSelectChatElement(target);
+        }
+
+        if (window.__waShowAltBadges && window.__waAltKeyDown) {
+            window.__waShowAltBadges();
+        }
+
+        return targetIndex;
+    };
+
+    // 8. Escuchadores directos de teclado y rueda dentro de la ventana web
+    if (!window.__waAltListenersAttached) {
+        window.__waAltListenersAttached = true;
+        window.__waAltKeyDown = false;
+        window.__waLastWheelNavTime = 0;
+
+        function handleWheel(e) {
+            var isAlt = e.altKey || window.__waAltKeyDown;
+            if (isAlt) {
+                e.preventDefault();
+                e.stopPropagation();
+                e.stopImmediatePropagation();
+
+                var now = Date.now();
+                if (now - window.__waLastWheelNavTime < 100) {
+                    return;
+                }
+
+                var delta = e.deltaY;
+                if (delta === 0 && e.deltaX !== 0) {
+                    delta = e.deltaX;
+                }
+
+                if (delta < 0) {
+                    window.__waLastWheelNavTime = now;
+                    window.__waNavigateChat(-1);
+                } else if (delta > 0) {
+                    window.__waLastWheelNavTime = now;
+                    window.__waNavigateChat(1);
+                }
+            }
+        }
+
+        window.addEventListener('keydown', function(e) {
+            if (e.key === 'Alt' || e.key === 'AltGraph') {
+                // Solo se marca el estado: C++ (eventFilter) es el unico que muestra los badges,
+                // evitando una segunda reconstruccion por la misma pulsacion.
+                window.__waAltKeyDown = true;
+            }
+        }, true);
+
+        window.addEventListener('keyup', function(e) {
+            if (e.key === 'Alt' || e.key === 'AltGraph') {
+                window.__waAltKeyDown = false;
+                window.__waHideAltBadges();
+            }
+        }, true);
+
+        window.addEventListener('blur', function() {
+            window.__waAltKeyDown = false;
+            window.__waHideAltBadges();
+        });
+
+        window.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+        document.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+
+        var pane = document.getElementById('pane-side');
+        if (pane && !pane.__waWheelAttached) {
+            pane.__waWheelAttached = true;
+            pane.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+        }
+    }
+})();
+)JS");
+}
+
+void WhatsAppClient::initChatHelpers() {
+    if (m_browser && m_browser->page()) {
+        m_browser->page()->runJavaScript(getInitChatHelpersJs());
+    }
+}
+
+void WhatsAppClient::switchToChatByIndex(int index) {
+    if (m_lockOverlay && m_lockOverlay->isLocked()) {
+        return;
+    }
+
+    m_currentChatIndex = index;
+
+    runChatJs(QStringLiteral(R"JS(
+        var validChats = window.__waGetValidChats();
+        if (validChats.length > %1) {
+            var target = validChats[%1];
+            window.__waCurrentChatIndex = %1;
+            window.__waHasRepliedInCurrentChat = false;
+            window.__waMarkingSeenActive = false;
+            if (window.__waCancelTemporarySeen) {
+                window.__waCancelTemporarySeen();
+            }
+            window.__waSelectChatElement(target);
+            if (window.__waAltKeyDown) {
+                window.__waShowAltBadges();
+            }
+        }
+        return %1;
+    )JS").arg(index));
+}
+
+// Ejecuta un cuerpo JS que depende de los helpers de chat sin re-inyectar el bloque completo
+// de getInitChatHelpersJs() en cada atajo. Si los helpers aun no existen (p. ej. tras recargar),
+// se inyectan una sola vez y se reintenta.
+void WhatsAppClient::runChatJs(const QString &body, std::function<void(const QVariant &)> callback, bool retried) {
+    if (!m_browser || !m_browser->page()) {
+        return;
+    }
+    const QString wrapped = QStringLiteral("(function(){ if (!window.__waGetValidChats || !window.__waSelectChatElement || !window.__waNavigateChat || !window.__waShowAltBadges) { return '__wa_need_init__'; }\n")
+                            + body + QStringLiteral("\n})();");
+    m_browser->page()->runJavaScript(wrapped, [this, body, callback, retried](const QVariant &result) {
+        if (result.toString() == QLatin1String("__wa_need_init__")) {
+            if (!retried && m_browser && m_browser->page()) {
+                m_browser->page()->runJavaScript(getInitChatHelpersJs());
+                runChatJs(body, callback, true);
+            }
+            return;
+        }
+        if (callback) {
+            callback(result);
+        }
+    });
+}
+
+void WhatsAppClient::navigateChatByOffset(int offset) {
+    if (m_lockOverlay && m_lockOverlay->isLocked()) {
+        return;
+    }
+    if (m_quickPrivacyMode) {
+        return;
+    }
+
+    runChatJs(QStringLiteral("return window.__waNavigateChat(%1);").arg(offset),
+              [this](const QVariant &result) {
+        bool ok = false;
+        int idx = result.toInt(&ok);
+        if (ok && idx >= 0) {
+            m_currentChatIndex = idx;
+        }
+    });
+}
+
+void WhatsAppClient::showChatBadges() {
+    if (isPrivacyActive()) {
+        return;
+    }
+
+    runChatJs(QStringLiteral("window.__waAltKeyDown = true; window.__waShowAltBadges(); return 0;"));
+}
+
+void WhatsAppClient::hideChatBadges() {
+    QString js = R"JS(
+    window.__waAltKeyDown = false;
+    if (window.__waHideAltBadges) {
+        window.__waHideAltBadges();
+    } else {
+        document.querySelectorAll('.wa-alt-badge').forEach(function(el) { el.remove(); });
+    }
+    )JS";
+
+    if (m_browser && m_browser->page()) {
+        m_browser->page()->runJavaScript(js);
+    }
+}
+
+void WhatsAppClient::onPageLoaded(bool ok) {
+    if (!ok) {
+        return;
+    }
+    if (m_browser) {
+        m_browser->installEventFilter(this);
+        if (m_browser->focusProxy()) {
+            m_browser->focusProxy()->installEventFilter(this);
+        }
+        for (QObject *child : m_browser->children()) {
+            if (child->isWidgetType()) {
+                child->installEventFilter(this);
+            }
+        }
+    }
+    if (isPrivacyActive()) {
+        applyNativeBlur(m_lockOverlay && m_lockOverlay->isLocked() ? 24 : 18);
+    }
+    if (m_browser && m_browser->page()) {
+        m_browser->page()->runJavaScript(getReadReceiptBlockerJs());
+        m_browser->page()->runJavaScript(getSidebarEnhancementsJs());
+    }
+    QTimer::singleShot(1500, this, [this]() {
+        if (m_browser && m_browser->page()) {
+            m_browser->page()->runJavaScript(getSidebarEnhancementsJs());
+        }
+    });
+    QTimer::singleShot(2500, this, &WhatsAppClient::initChatHelpers);
+    QTimer::singleShot(4000, this, &WhatsAppClient::scrapeRecentChats);
+}
+
+void WhatsAppClient::scrapeRecentChats() {
+    initChatHelpers();
+    QString js = R"JS(
+    (function() {
+        var chats = [];
+        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats() : [];
+        if (!validChats.length) {
+            var pane = document.getElementById('pane-side');
+            if (!pane) return JSON.stringify(chats);
+            validChats = pane.querySelectorAll('[role="row"], [role="listitem"]');
+        }
+        
+        var count = Math.min(validChats.length, 10);
+        for (var i = 0; i < count; i++) {
+            var row = validChats[i];
+            var titleEl = row.querySelector('span[title]') || row.querySelector('span[dir="auto"]');
+            var lastMsgEl = row.querySelector('span[data-testid="last-msg-status"]') ||
+                            row.querySelector('span.matched-text') ||
+                            row.querySelector('div[data-testid="cell-frame-secondary"] span span') ||
+                            row.querySelector('[role="gridcell"]:last-child span');
+            if (titleEl) {
+                var nameText = titleEl.getAttribute('title') || titleEl.textContent || '';
+                if (nameText.trim()) {
+                    chats.push({
+                        name: nameText.trim(),
+                        lastMsg: lastMsgEl ? lastMsgEl.textContent.substring(0, 50).trim() : ''
+                    });
+                }
+            }
+        }
+        return JSON.stringify(chats);
+    })();
+    )JS";
+
+    if (m_browser && m_browser->page()) {
+        m_browser->page()->runJavaScript(js, [this](const QVariant &result) {
+            onChatsScraped(result.toString());
+        });
+    }
+}
+
+void WhatsAppClient::onChatsScraped(const QString &result) {
+    if (result.isEmpty()) return;
+    QJsonDocument doc = QJsonDocument::fromJson(result.toUtf8());
+    if (doc.isArray()) {
+        QJsonArray arr = doc.array();
+        m_recentChats.clear();
+        for (const QJsonValue &val : arr) {
+            if (val.isObject()) {
+                QJsonObject obj = val.toObject();
+                RecentChat chat;
+                chat.name = obj.value("name").toString();
+                chat.lastMsg = obj.value("lastMsg").toString();
+                m_recentChats.append(chat);
+            }
+        }
+    }
+}
+
+void WhatsAppClient::updateRecentChat(const QString &name, const QString &message) {
+    if (name.trimmed().isEmpty()) return;
+    QString cleanName = name.trimmed();
+
+    for (int i = 0; i < m_recentChats.size(); ++i) {
+        if (m_recentChats[i].name == cleanName) {
+            m_recentChats.removeAt(i);
+            break;
+        }
+    }
+
+    RecentChat chat;
+    chat.name = cleanName;
+    chat.lastMsg = message.trimmed().left(50);
+    m_recentChats.prepend(chat);
+    if (m_recentChats.size() > 10) {
+        m_recentChats = m_recentChats.mid(0, 10);
+    }
+}
+
+void WhatsAppClient::setupZoom() {
+    QAction *zoomInAction = new QAction(this);
+    zoomInAction->setShortcuts({QKeySequence("Ctrl++"), QKeySequence("Ctrl+=")});
+    connect(zoomInAction, &QAction::triggered, this, &WhatsAppClient::zoomIn);
+    addAction(zoomInAction);
+
+    QAction *zoomOutAction = new QAction(this);
+    zoomOutAction->setShortcut(QKeySequence("Ctrl+-"));
+    connect(zoomOutAction, &QAction::triggered, this, &WhatsAppClient::zoomOut);
+    addAction(zoomOutAction);
+
+    QAction *zoomResetAction = new QAction(this);
+    zoomResetAction->setShortcut(QKeySequence("Ctrl+0"));
+    connect(zoomResetAction, &QAction::triggered, this, &WhatsAppClient::zoomReset);
+    addAction(zoomResetAction);
+}
+
+void WhatsAppClient::zoomIn() {
+    if (m_browser) {
+        qreal currentZoom = m_browser->zoomFactor();
+        m_browser->setZoomFactor(currentZoom + 0.1);
+    }
+}
+
+void WhatsAppClient::zoomOut() {
+    if (m_browser) {
+        qreal currentZoom = m_browser->zoomFactor();
+        m_browser->setZoomFactor(qMax(0.2, currentZoom - 0.1));
+    }
+}
+
+void WhatsAppClient::zoomReset() {
+    if (m_browser) {
+        m_browser->setZoomFactor(1.0);
+    }
+}
+
+void WhatsAppClient::handleWhatsAppUrl(const QString &url) {
+    if (url.contains("chat") && url.contains("code=")) {
+        QString afterCode = url.section("code=", 1, 1);
+        QString code = afterCode.section('&', 0, 0);
+        QString webUrl = QString("https://web.whatsapp.com/accept?code=%1").arg(code);
+        if (m_browser && m_browser->page()) {
+            m_browser->page()->runJavaScript(QString("window.location.href = '%1';").arg(webUrl));
+        }
+    } else if (url.contains("send") && url.contains("?")) {
+        QString query = url.section('?', 1);
+        QString webUrl = QString("https://web.whatsapp.com/send?%1").arg(query);
+        if (m_browser && m_browser->page()) {
+            m_browser->page()->runJavaScript(QString("window.location.href = '%1';").arg(webUrl));
+        }
+    }
+}
+
+void WhatsAppClient::openChat(const QString &chatName) {
+    show();
+    activateWindow();
+
+    QJsonArray arr;
+    arr.append(chatName);
+    QString jsonChat = QString::fromUtf8(QJsonDocument(arr).toJson(QJsonDocument::Compact));
+    jsonChat = jsonChat.mid(1, jsonChat.length() - 2);
+
+    QString js = QString(R"JS(
+        var targetName = %1;
+        var norm = function(s) { return (s || '').replace(/\s*\((tú|you|tu)\)\s*/gi, '').trim().toLowerCase(); };
+        var wanted = norm(targetName);
+        var chats = window.__waGetValidChats();
+        for (var i = 0; i < chats.length; i++) {
+            var t = chats[i].querySelector('span[title]') ||
+                    chats[i].querySelector('div[data-testid="cell-frame-title"] span') ||
+                    chats[i].querySelector('span[dir="auto"]');
+            var raw = t ? (t.getAttribute('title') || t.textContent || '') : (chats[i].getAttribute('title') || '');
+            if (norm(raw) === wanted) {
+                window.__waCurrentChatIndex = i;
+                window.__waSelectChatElement(chats[i]);
+                return i;
+            }
+        }
+        return -1;
+    )JS").arg(jsonChat);
+
+    runChatJs(js);
+}
+
+void WhatsAppClient::sendWhatsAppMessage(const QString &chatName, const QString &text) {
+    QJsonArray arrChat;
+    arrChat.append(chatName);
+    QString jsonChat = QString::fromUtf8(QJsonDocument(arrChat).toJson(QJsonDocument::Compact));
+    jsonChat = jsonChat.mid(1, jsonChat.length() - 2);
+
+    QJsonArray arrText;
+    arrText.append(text);
+    QString jsonText = QString::fromUtf8(QJsonDocument(arrText).toJson(QJsonDocument::Compact));
+    jsonText = jsonText.mid(1, jsonText.length() - 2);
+
+    QString js = QString(R"JS(
+        var targetChat = %1;
+        var norm = function(s) { return (s || '').replace(/\s*\((tú|you|tu)\)\s*/gi, '').trim().toLowerCase(); };
+        var wanted = norm(targetChat);
+        var chats = window.__waGetValidChats();
+        var found = null;
+        for (var i = 0; i < chats.length; i++) {
+            var t = chats[i].querySelector('span[title]') ||
+                    chats[i].querySelector('div[data-testid="cell-frame-title"] span') ||
+                    chats[i].querySelector('span[dir="auto"]');
+            var raw = t ? (t.getAttribute('title') || t.textContent || '') : (chats[i].getAttribute('title') || '');
+            if (norm(raw) === wanted) { found = chats[i]; window.__waCurrentChatIndex = i; break; }
+        }
+        if (!found) return -1;
+        window.__waSelectChatElement(found);
+
+        setTimeout(function() {
+            var composer = document.querySelector('#main footer div[contenteditable="true"]') ||
+                           document.querySelector('div[contenteditable="true"][data-tab="10"]');
+            if (!composer) return;
+            composer.focus();
+            document.execCommand('insertText', false, %2);
+
+            setTimeout(function() {
+                var sendIcon = document.querySelector('#main footer span[data-icon="send"]') ||
+                               document.querySelector('#main footer span[data-testid="send"]') ||
+                               document.querySelector('span[data-icon="send"]') ||
+                               document.querySelector('span[data-testid="send"]');
+                var btn = sendIcon ? (sendIcon.closest('button') || sendIcon.closest('[role="button"]')) :
+                          document.querySelector('#main footer button[aria-label="Enviar"], #main footer button[aria-label="Send"]');
+                if (!btn) return;
+                btn.click();
+                if (window.__waTriggerTemporarySeen) {
+                    window.__waTriggerTemporarySeen();
+                } else if (window.__waTriggerSeen) {
+                    setTimeout(window.__waTriggerSeen, 200);
+                    setTimeout(window.__waTriggerSeen, 600);
+                }
+            }, 150);
+        }, 400);
+        return 1;
+    )JS").arg(jsonChat, jsonText);
+
+    runChatJs(js);
+}
+
+QString WhatsAppClient::getReadReceiptBlockerJs() const {
+    return QString::fromUtf8(R"JS(
+(function() {
+    'use strict';
+    if (window.__waReadReceiptControllerInitialized) return;
+    window.__waReadReceiptControllerInitialized = true;
+
+    // Estado local: ventana activa momentanea de marcado de lectura
+    window.__waMarkingSeenActive = false;
+    window.__waHasRepliedInCurrentChat = false;
+
+    var seenResetTimer = null;
+
+    // Interceptar hasFocus: WhatsApp Web solo envia confirmaciones de lectura (doble check azul)
+    // cuando el documento reporta foco activo. Al devolver false de forma predeterminada,
+    // se mantiene la lectura de mensajes en modo incognito (doble check gris para el remitente).
+    var customHasFocus = function() {
+        if (window.__waMarkingSeenActive) {
+            return true;
+        }
+        // Permitir foco si el usuario esta interactuando con menus contextuales
+        if (document.querySelector('[data-animate-dropdown-item="true"]') || document.querySelector('div[role="menu"]')) {
+            return true;
+        }
+        return false;
+    };
+
+    try {
+        Document.prototype.hasFocus = customHasFocus;
+    } catch (e) {}
+    document.hasFocus = customHasFocus;
+
+    // Cancelar cualquier ventana activa de marcado de lectura y volver a modo incognito
+    window.__waCancelTemporarySeen = function() {
+        if (seenResetTimer) {
+            clearTimeout(seenResetTimer);
+            seenResetTimer = null;
+        }
+        window.__waMarkingSeenActive = false;
+        window.__waHasRepliedInCurrentChat = false;
+        try {
+            window.dispatchEvent(new FocusEvent('blur'));
+            window.dispatchEvent(new Event('blur'));
+        } catch (e) {}
+    };
+
+    // Funcion central para forzar la emision de read receipts en WhatsApp Web sobre el chat activo
+    window.__waTriggerSeenCore = function() {
+        // 1. Notificar eventos de foco a nivel de ventana y documento
+        try {
+            window.dispatchEvent(new FocusEvent('focus'));
+            window.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new Event('visibilitychange'));
+        } catch (e) {}
+
+        // 2. Re-despachar seleccion sobre el chat activo en la lista lateral (#pane-side)
+        var activeRow = document.querySelector('#pane-side [aria-selected="true"]');
+        if (!activeRow) {
+            var header = document.querySelector('#main header');
+            if (header) {
+                var titleEl = header.querySelector('span[title]') || 
+                              header.querySelector('div[data-testid="conversation-info-header"] span[title]') ||
+                              header.querySelector('div[role="button"] span[dir="auto"]') ||
+                              header.querySelector('span[dir="auto"]');
+                var activeTitle = titleEl ? (titleEl.getAttribute('title') || titleEl.innerText || titleEl.textContent || '').trim().toLowerCase() : '';
+                if (activeTitle) {
+                    var allSpans = document.querySelectorAll('#pane-side span[title], #pane-side div[data-testid="cell-frame-title"] span, #pane-side span[dir="auto"]');
+                    for (var i = 0; i < allSpans.length; i++) {
+                        var text = (allSpans[i].getAttribute('title') || allSpans[i].innerText || allSpans[i].textContent || '').trim().toLowerCase();
+                        if (text === activeTitle) {
+                            activeRow = allSpans[i].closest('[role="listitem"]') || allSpans[i].closest('div[data-testid="cell-frame-container"]') || allSpans[i];
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        if (activeRow) {
+            if (window.__waSelectChatElement) {
+                window.__waSelectChatElement(activeRow);
+            } else {
+                var clickTarget = activeRow.querySelector('div[data-testid="cell-frame-container"]') || activeRow;
+                ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtName) {
+                    clickTarget.dispatchEvent(new MouseEvent(evtName, {
+                        bubbles: true,
+                        cancelable: true,
+                        view: window,
+                        buttons: 1
+                    }));
+                });
+            }
+        }
+
+        // 3. Restaurar foco en el campo de texto del mensaje
+        setTimeout(function() {
+            var composer = document.querySelector('footer div[contenteditable="true"]') ||
+                           document.querySelector('div[contenteditable="true"][data-tab="10"]');
+            if (composer) {
+                composer.focus();
+            }
+        }, 50);
+    };
+
+    // Disparador temporal: habilita momentaneamente el marcado de los mensajes acumulados,
+    // emite los eventos y se desactiva tras 1400 ms para que los mensajes que lleguen despues
+    // sigan sin leerse (doble check gris) hasta que el usuario envie una nueva respuesta.
+    window.__waTriggerTemporarySeen = function() {
+        if (seenResetTimer) {
+            clearTimeout(seenResetTimer);
+            seenResetTimer = null;
+        }
+
+        window.__waMarkingSeenActive = true;
+        window.__waHasRepliedInCurrentChat = true;
+
+        setTimeout(function() {
+            if (window.__waTriggerSeenCore) window.__waTriggerSeenCore();
+        }, 200);
+
+        setTimeout(function() {
+            if (window.__waTriggerSeenCore) window.__waTriggerSeenCore();
+        }, 600);
+
+        // Desactivar el estado de lectura tras una ventana de 1400 ms
+        seenResetTimer = setTimeout(function() {
+            window.__waMarkingSeenActive = false;
+            window.__waHasRepliedInCurrentChat = false;
+            seenResetTimer = null;
+            try {
+                window.dispatchEvent(new FocusEvent('blur'));
+                window.dispatchEvent(new Event('blur'));
+            } catch (e) {}
+        }, 1400);
+    };
+
+    window.__waTriggerSeen = window.__waTriggerTemporarySeen;
+
+    // Al cambiar de chat mediante clic del usuario en la barra lateral (#pane-side),
+    // se reinicia el estado de respuesta para que el nuevo chat quede en modo incognito
+    document.addEventListener('click', function(event) {
+        if (!event.isTrusted) return;
+        var target = event.target;
+        if (target && target.closest('#pane-side')) {
+            window.__waCancelTemporarySeen();
+        }
+    }, true);
+
+    // Deteccion de envio por teclado (tecla Enter en el campo de texto editable)
+    window.addEventListener('keydown', function(event) {
+        if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.isComposing) {
+            var composer = document.querySelector('footer div[contenteditable="true"]') ||
+                           document.querySelector('div[contenteditable="true"][data-tab="10"]') ||
+                           event.target;
+            if (composer) {
+                var text = (composer.innerText || composer.textContent || '').trim();
+                if (text.length > 0) {
+                    window.__waTriggerTemporarySeen();
+                }
+            }
+        }
+    }, true);
+
+    // Deteccion de envio por clic en el boton de enviar (o envio de audio/adjuntos)
+    window.addEventListener('click', function(event) {
+        if (!event.isTrusted) return;
+        var target = event.target;
+        if (!target) return;
+        var sendBtn = target.closest('button span[data-icon="send"], button span[data-testid="send"], button[aria-label="Send"], button[aria-label="Enviar"], button[data-tab="11"], button[data-testid="compose-btn-send"], div[role="button"][aria-label="Send"], div[role="button"][aria-label="Enviar"]');
+        if (sendBtn || target.getAttribute('data-icon') === 'send' || target.getAttribute('data-testid') === 'send') {
+            window.__waTriggerTemporarySeen();
+        }
+    }, true);
+})();
+)JS");
+}
+
+void WhatsAppClient::setupReadReceiptScript() {
+    if (!m_profile) return;
+
+    QWebEngineScript script;
+    script.setName(QStringLiteral("WAWebReadReceiptController"));
+    script.setSourceCode(getReadReceiptBlockerJs());
+    script.setInjectionPoint(QWebEngineScript::DocumentCreation);
+    script.setWorldId(QWebEngineScript::MainWorld);
+    script.setRunsOnSubFrames(false);
+
+    m_profile->scripts()->insert(script);
+}
+
+void WhatsAppClient::toggleSidebarCompact() {
+    if (m_browser && m_browser->page()) {
+        m_browser->page()->runJavaScript(QStringLiteral("if (window.__waToggleSidebarCompact) { window.__waToggleSidebarCompact(); }"));
+    }
+}
+
+QString WhatsAppClient::getSidebarEnhancementsJs() const {
+    return QString::fromUtf8(R"JS(
+(function() {
+    'use strict';
+    if (window.__waSidebarEnhancementsInitialized) return;
+    window.__waSidebarEnhancementsInitialized = true;
+
+    var STORAGE_KEY_WIDTH = 'wa_sidebar_width';
+    var STORAGE_KEY_COMPACT = 'wa_sidebar_compact';
+    var MIN_WIDTH = 280;
+    var DEFAULT_WIDTH = 360;
+
+    var isDragging = false;
+    var resizerElement = null;
+    var rafPending = false;
+    var targetClientX = 0;
+
+    var cachedSideColumn = null;
+    var cachedMainColumn = null;
+    var cachedFlexContainer = null;
+
+    var SVG_COLLAPSE = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">' +
+                       '<path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/>' +
+                       '</svg>';
+
+    var SVG_EXPAND = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">' +
+                     '<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>' +
+                     '</svg>';
+
+    function injectStyles() {
+        var existing = document.getElementById('wa-sidebar-enhancements-style');
+        if (existing) {
+            existing.remove();
+        }
+        var style = document.createElement('style');
+        style.id = 'wa-sidebar-enhancements-style';
+        style.textContent = `
+            :root {
+                --wa-sidebar-width: 360px;
+                --wa-resizer-hitbox-width: 8px;
+                --wa-resizer-line-width: 2px;
+                --wa-resizer-color-hover: #00a884;
+                --wa-resizer-color-default: rgba(134, 150, 160, 0.25);
+            }
+
+            body.wa-sidebar-compact {
+                --wa-sidebar-width: 70px !important;
+            }
+
+            /* Reseteo full-viewport y supresion de linea blanca superior */
+            html,
+            body {
+                margin: 0 !important;
+                padding: 0 !important;
+                overflow: hidden !important;
+                background-color: var(--background-default, #111b21) !important;
+                border: none !important;
+            }
+
+            div.app-wrapper-web,
+            .app-wrapper-web {
+                top: 0 !important;
+                left: 0 !important;
+                width: 100vw !important;
+                height: 100vh !important;
+                max-width: 100vw !important;
+                max-height: 100vh !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                border: none !important;
+                border-radius: 0 !important;
+                box-shadow: none !important;
+                transform: none !important;
+            }
+
+            body::before,
+            body::after,
+            #app::before,
+            #app::after,
+            .app-wrapper-web::before,
+            .app-wrapper-web::after {
+                display: none !important;
+                content: none !important;
+                height: 0 !important;
+                border: none !important;
+            }
+
+            .two,
+            .three,
+            #main,
+            #main header,
+            #side,
+            #side header,
+            [data-wa-main-column="true"],
+            [data-wa-side-column="true"] {
+                border-top: none !important;
+                border-top-width: 0 !important;
+                box-shadow: none !important;
+            }
+
+            #main header::before,
+            #main header::after {
+                border-top: none !important;
+                box-shadow: none !important;
+            }
+
+            /* 1. Columna Lateral (#side) y su wrapper */
+            #side,
+            [data-wa-side-column="true"],
+            .two > div:has(> #side),
+            .three > div:has(> #side),
+            .two > div:has(#side),
+            .three > div:has(#side) {
+                width: var(--wa-sidebar-width) !important;
+                min-width: var(--wa-sidebar-width) !important;
+                max-width: var(--wa-sidebar-width) !important;
+                flex: 0 0 var(--wa-sidebar-width) !important;
+                flex-basis: var(--wa-sidebar-width) !important;
+                flex-grow: 0 !important;
+                flex-shrink: 0 !important;
+                box-sizing: border-box !important;
+                position: relative !important;
+            }
+
+            [data-wa-side-column="true"] #side,
+            [data-wa-side-column="true"] > div,
+            .two > div:has(#side) #side,
+            .two > div:has(#side) > div,
+            .three > div:has(#side) #side,
+            .three > div:has(#side) > div {
+                width: 100% !important;
+                min-width: 100% !important;
+                max-width: 100% !important;
+                flex: 1 1 auto !important;
+            }
+
+            /* 2. Columna de Conversacion (#main): SOLO el contenedor inmediato adyacente */
+            #main,
+            [data-wa-main-column="true"],
+            [data-wa-side-column="true"] + div,
+            .two > div:has(> #main),
+            .three > div:has(> #main),
+            .two > div:has(#main),
+            .three > div:has(#main),
+            .two > div:has(#side) + div,
+            .three > div:has(#side) + div {
+                flex: 1 1 0% !important;
+                flex-grow: 1 !important;
+                flex-shrink: 1 !important;
+                min-width: 0 !important;
+                width: auto !important;
+                max-width: none !important;
+                box-sizing: border-box !important;
+            }
+
+            [data-wa-main-column="true"] > #main,
+            .two > div:has(#main) > #main,
+            .three > div:has(#main) > #main {
+                width: 100% !important;
+                height: 100% !important;
+                min-width: 0 !important;
+                flex: 1 1 auto !important;
+            }
+
+            #main > div,
+            #main [data-testid="conversation-panel-wrapper"],
+            #main [role="region"],
+            #main div[tabindex="-1"] {
+                max-width: 100% !important;
+                width: 100% !important;
+                box-sizing: border-box !important;
+            }
+
+            /* 3. Neutralizacion de paneles auxiliares cerrados */
+            .two > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty,
+            .three > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty {
+                width: 0 !important;
+                min-width: 0 !important;
+                max-width: 0 !important;
+                flex: 0 0 0px !important;
+                display: none !important;
+            }
+
+            /* 4. Divisor / Splitter */
+            #wa-custom-resizer {
+                position: fixed !important;
+                top: 0 !important;
+                bottom: 0 !important;
+                width: var(--wa-resizer-hitbox-width) !important;
+                margin-left: calc(var(--wa-resizer-hitbox-width) / -2) !important;
+                cursor: col-resize !important;
+                z-index: 9999 !important;
+                background-color: transparent !important;
+                user-select: none !important;
+                -webkit-user-select: none !important;
+                touch-action: none !important;
+                display: none;
+            }
+
+            #wa-custom-resizer::after {
+                content: '' !important;
+                position: absolute !important;
+                top: 0 !important;
+                bottom: 0 !important;
+                left: calc(50% - (var(--wa-resizer-line-width) / 2)) !important;
+                width: var(--wa-resizer-line-width) !important;
+                background-color: var(--wa-resizer-color-default) !important;
+                transition: background-color 0.15s ease-in-out !important;
+                pointer-events: none !important;
+            }
+
+            #wa-custom-resizer:hover::after,
+            #wa-custom-resizer.is-resizing::after {
+                background-color: var(--wa-resizer-color-hover) !important;
+            }
+
+            html.wa-resizing-active,
+            html.wa-resizing-active * {
+                cursor: col-resize !important;
+                user-select: none !important;
+                -webkit-user-select: none !important;
+                transition: none !important;
+            }
+
+            /* 5. Reglas del Modo Compacto (limitadas al subarbol de #side para no aplastar
+               toasts/drawers que WhatsApp monta como hermanos de #side dentro de la columna) */
+            body.wa-sidebar-compact #side,
+            body.wa-sidebar-compact [data-wa-side-column="true"],
+            body.wa-sidebar-compact #side div,
+            body.wa-sidebar-compact .two > div:has(#side),
+            body.wa-sidebar-compact .three > div:has(#side) {
+                width: 70px !important;
+                min-width: 70px !important;
+                max-width: 70px !important;
+                flex: 0 0 70px !important;
+                flex-basis: 70px !important;
+                overflow: hidden !important;
+                overflow-x: hidden !important;
+                border-right: none !important;
+                border-right-width: 0 !important;
+                box-shadow: none !important;
+            }
+
+            /* La columna lateral no recorta: los toasts pueden sobresalir sobre #main */
+            body.wa-sidebar-compact [data-wa-side-column="true"],
+            body.wa-sidebar-compact .two > div:has(#side),
+            body.wa-sidebar-compact .three > div:has(#side) {
+                overflow: visible !important;
+                overflow-x: visible !important;
+            }
+
+            /* Toasts / snackbars de WhatsApp: ancho natural independiente de la barra */
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [role="alert"],
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [role="status"],
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [data-testid*="toast"],
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [data-animate-toast],
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [role="alert"] div,
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [role="status"] div,
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [data-testid*="toast"] div {
+                width: auto !important;
+                min-width: max-content !important;
+                max-width: 90vw !important;
+                flex: 0 0 auto !important;
+                overflow: visible !important;
+                white-space: nowrap !important;
+            }
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [role="alert"],
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [role="status"],
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [data-testid*="toast"],
+            body.wa-sidebar-compact #app [data-wa-side-column="true"] [data-animate-toast] {
+                z-index: 99999 !important;
+            }
+
+            /* Linea vertical residual: capas hermanas (drawers/overlays) del contenedor flex
+               conservan el ancho/borde original de WhatsApp (~30%). Se sincronizan con la barra
+               y se eliminan sus bordes en ambos modos. */
+            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not(:has([role="alert"], [role="status"], [data-testid*="toast"])) {
+                border-right: none !important;
+                border-left: none !important;
+                box-shadow: none !important;
+                max-width: var(--wa-sidebar-width, 30%) !important;
+            }
+            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"])::before,
+            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"])::after,
+            [data-wa-flex-container="true"]::before,
+            [data-wa-flex-container="true"]::after {
+                border: none !important;
+                box-shadow: none !important;
+            }
+            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):empty {
+                display: none !important;
+            }
+
+            body.wa-sidebar-compact #side::before,
+            body.wa-sidebar-compact #side::after,
+            body.wa-sidebar-compact [data-wa-side-column="true"]::before,
+            body.wa-sidebar-compact [data-wa-side-column="true"]::after,
+            body.wa-sidebar-compact [data-wa-side-column="true"] *::before,
+            body.wa-sidebar-compact [data-wa-side-column="true"] *::after,
+            body.wa-sidebar-compact .two > div:has(#side)::before,
+            body.wa-sidebar-compact .two > div:has(#side)::after,
+            body.wa-sidebar-compact .three > div:has(#side)::before,
+            body.wa-sidebar-compact .three > div:has(#side)::after {
+                display: none !important;
+                content: none !important;
+                width: 0 !important;
+                height: 0 !important;
+                border: none !important;
+            }
+
+            body.wa-sidebar-compact [data-wa-main-column="true"],
+            body.wa-sidebar-compact [data-wa-side-column="true"] + div,
+            body.wa-sidebar-compact .two > div:has(#main),
+            body.wa-sidebar-compact .three > div:has(#main),
+            body.wa-sidebar-compact .two > div:has(#side) + div,
+            body.wa-sidebar-compact .three > div:has(#side) + div {
+                flex: 1 1 0% !important;
+                flex-grow: 1 !important;
+                flex-shrink: 1 !important;
+                min-width: 0 !important;
+                width: auto !important;
+                max-width: none !important;
+                border-left: none !important;
+                border-left-width: 0 !important;
+            }
+
+            body.wa-sidebar-compact #main::before,
+            body.wa-sidebar-compact #main::after,
+            body.wa-sidebar-compact [data-wa-main-column="true"]::before,
+            body.wa-sidebar-compact [data-wa-main-column="true"]::after {
+                display: none !important;
+                content: none !important;
+                width: 0 !important;
+                height: 0 !important;
+                border: none !important;
+            }
+
+            body.wa-sidebar-compact #wa-custom-resizer,
+            body.wa-sidebar-compact #wa-custom-resizer::before,
+            body.wa-sidebar-compact #wa-custom-resizer::after {
+                display: none !important;
+                visibility: hidden !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+                width: 0 !important;
+                height: 0 !important;
+                left: -9999px !important;
+                margin: 0 !important;
+            }
+
+            body.wa-sidebar-compact #side > div:not(#pane-side):not(header),
+            body.wa-sidebar-compact #side [role="search"],
+            body.wa-sidebar-compact #side div:has(input),
+            body.wa-sidebar-compact #side div:has([data-tab="3"]),
+            body.wa-sidebar-compact #side div:has(span[data-icon="search"]),
+            body.wa-sidebar-compact #side [data-testid="chat-list-search"] {
+                display: none !important;
+                height: 0 !important;
+                min-height: 0 !important;
+                max-height: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                border: none !important;
+                overflow: hidden !important;
+                visibility: hidden !important;
+            }
+
+            body.wa-sidebar-compact #side [role="tablist"],
+            body.wa-sidebar-compact #side div:has(> [role="tablist"]),
+            body.wa-sidebar-compact #side div[role="region"]:has(button),
+            body.wa-sidebar-compact #side div:has(button[role="button"][value]),
+            body.wa-sidebar-compact #side button:has(span[data-icon="filter"]),
+            body.wa-sidebar-compact #side div:has(span[data-icon="filter"]) {
+                display: none !important;
+                height: 0 !important;
+                min-height: 0 !important;
+                max-height: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                border: none !important;
+                overflow: hidden !important;
+                visibility: hidden !important;
+            }
+
+            body.wa-sidebar-compact #side [data-testid="archived"],
+            body.wa-sidebar-compact #side [data-testid="archive"],
+            body.wa-sidebar-compact #side [aria-label*="Archiv"],
+            body.wa-sidebar-compact #side [aria-label*="archiv"],
+            body.wa-sidebar-compact #side div[role="listitem"]:has(span[data-icon*="archiv"]),
+            body.wa-sidebar-compact #side div[role="row"]:has(span[data-icon*="archiv"]),
+            body.wa-sidebar-compact #side button:has(span[data-icon*="archiv"]),
+            body.wa-sidebar-compact #side div:has(> span[data-icon*="archiv"]),
+            body.wa-sidebar-compact #side span[data-icon="archive"],
+            body.wa-sidebar-compact #side span[data-icon="archived"],
+            body.wa-sidebar-compact .wa-archived-row {
+                display: none !important;
+                height: 0 !important;
+                min-height: 0 !important;
+                max-height: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                border: none !important;
+                overflow: hidden !important;
+                visibility: hidden !important;
+            }
+
+            body.wa-sidebar-compact #pane-side {
+                width: 70px !important;
+                max-width: 70px !important;
+                overflow-x: hidden !important;
+                scrollbar-width: none !important;
+            }
+
+            body.wa-sidebar-compact #pane-side::-webkit-scrollbar {
+                width: 0px !important;
+                display: none !important;
+            }
+
+            /* Filas y celdas del listado de chats en modo compacto */
+            body.wa-sidebar-compact #pane-side [role="row"],
+            body.wa-sidebar-compact #pane-side [role="listitem"],
+            body.wa-sidebar-compact #pane-side [role="gridcell"],
+            body.wa-sidebar-compact #pane-side [role="row"] > div,
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div,
+            body.wa-sidebar-compact #pane-side [role="gridcell"] > div,
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] {
+                width: 70px !important;
+                max-width: 70px !important;
+                min-width: 70px !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                display: flex !important;
+                justify-content: center !important;
+                align-items: center !important;
+                box-sizing: border-box !important;
+                overflow: hidden !important;
+                position: relative !important;
+            }
+
+            /* Ocultacion universal de texto, fecha, preview, badges y chinchetas */
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :not(:first-child),
+            body.wa-sidebar-compact #pane-side [role="row"] > :not(:first-child),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > :not(:first-child),
+            body.wa-sidebar-compact #pane-side [role="gridcell"] > :not(:first-child),
+            body.wa-sidebar-compact #pane-side [role="row"] > div > :not(:first-child),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > :not(:first-child),
+            body.wa-sidebar-compact #pane-side [role="gridcell"] > div > :not(:first-child),
+            body.wa-sidebar-compact #pane-side [role="row"] > div > div > :not(:first-child),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > div > :not(:first-child),
+            body.wa-sidebar-compact #pane-side [data-testid="cell-frame-title"],
+            body.wa-sidebar-compact #pane-side [data-testid="cell-frame-primary"],
+            body.wa-sidebar-compact #pane-side [data-testid="cell-frame-secondary"],
+            body.wa-sidebar-compact #pane-side [data-testid="last-msg-status"],
+            body.wa-sidebar-compact #pane-side span[data-testid="chat-title"],
+            body.wa-sidebar-compact #pane-side [data-icon*="pin"],
+            body.wa-sidebar-compact #pane-side [data-testid="pinned"],
+            body.wa-sidebar-compact #pane-side [data-testid="pin"],
+            body.wa-sidebar-compact #pane-side [data-icon="unread-count"],
+            body.wa-sidebar-compact #pane-side [data-testid="icon-unread-count"] {
+                display: none !important;
+                width: 0 !important;
+                min-width: 0 !important;
+                max-width: 0 !important;
+                height: 0 !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                overflow: hidden !important;
+                visibility: hidden !important;
+                flex: 0 0 0px !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
+            }
+
+            /* Columna del avatar: Dimension fija estricta de 49px x 49px centrada */
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :first-child,
+            body.wa-sidebar-compact #pane-side [role="row"] > :first-child,
+            body.wa-sidebar-compact #pane-side [role="listitem"] > :first-child,
+            body.wa-sidebar-compact #pane-side [role="gridcell"] > :first-child,
+            body.wa-sidebar-compact #pane-side [role="row"] > div > :first-child,
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > :first-child,
+            body.wa-sidebar-compact #pane-side [role="gridcell"] > div > :first-child,
+            body.wa-sidebar-compact #pane-side [role="row"] > div > div > :first-child,
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > div > :first-child {
+                width: 49px !important;
+                min-width: 49px !important;
+                max-width: 49px !important;
+                height: 49px !important;
+                min-height: 49px !important;
+                max-height: 49px !important;
+                margin: 0 auto !important;
+                padding: 0 !important;
+                position: relative !important;
+                display: flex !important;
+                justify-content: center !important;
+                align-items: center !important;
+                flex: 0 0 49px !important;
+                box-sizing: border-box !important;
+                overflow: visible !important;
+            }
+
+            /* Envoltorios internos del avatar: neutralizacion de paddings nativos */
+            body.wa-sidebar-compact #pane-side [role="row"] div:has(> img),
+            body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> img),
+            body.wa-sidebar-compact #pane-side [role="row"] div[role="button"],
+            body.wa-sidebar-compact #pane-side [role="listitem"] div[role="button"],
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] div[role="button"],
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] div:has(> img) {
+                width: 49px !important;
+                min-width: 49px !important;
+                max-width: 49px !important;
+                height: 49px !important;
+                min-height: 49px !important;
+                max-height: 49px !important;
+                margin: 0 auto !important;
+                padding: 0 !important;
+                display: flex !important;
+                justify-content: center !important;
+                align-items: center !important;
+                flex-shrink: 0 !important;
+                position: relative !important;
+                box-sizing: border-box !important;
+            }
+
+            /* Imagen de perfil del avatar centrada y dimensionada */
+            body.wa-sidebar-compact #pane-side [role="row"] img,
+            body.wa-sidebar-compact #pane-side [role="listitem"] img,
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] img {
+                width: 49px !important;
+                min-width: 49px !important;
+                max-width: 49px !important;
+                height: 49px !important;
+                min-height: 49px !important;
+                max-height: 49px !important;
+                object-fit: cover !important;
+                display: block !important;
+                margin: 0 auto !important;
+                padding: 0 !important;
+                box-sizing: border-box !important;
+                flex-shrink: 0 !important;
+            }
+
+            /* Avatares circulares para chats estandar (usuarios y grupos) */
+            body.wa-sidebar-compact #pane-side [role="row"]:not(:has([data-icon*="community"])) img,
+            body.wa-sidebar-compact #pane-side [role="listitem"]:not(:has([data-icon*="community"])) img,
+            body.wa-sidebar-compact #pane-side [role="row"]:not(:has([data-icon*="community"])) div[role="button"],
+            body.wa-sidebar-compact #pane-side [role="listitem"]:not(:has([data-icon*="community"])) div[role="button"],
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:not(:has([data-icon*="community"])) img {
+                border-radius: 50% !important;
+                overflow: hidden !important;
+            }
+
+            /* Iconos squircle (circulo cuadrado) para comunidades y canales */
+            body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]):has([data-icon*="community"]) img,
+            body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]):has([data-icon*="community"]) div[role="button"],
+            body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]):has([data-icon*="community"]) div:has(> img),
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:has([data-icon*="community"]) img,
+            body.wa-sidebar-compact #pane-side span[data-icon*="community"] svg,
+            body.wa-sidebar-compact #pane-side span[data-icon*="community"] {
+                border-radius: 30% !important;
+                overflow: hidden !important;
+            }
+
+            /* Superposicion de aro SVG de historia o estado */
+            body.wa-sidebar-compact #pane-side [role="row"] > :first-child svg:not([data-icon]),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > :first-child svg:not([data-icon]),
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :first-child svg:not([data-icon]) {
+                position: absolute !important;
+                top: 50% !important;
+                left: 50% !important;
+                transform: translate(-50%, -50%) !important;
+                margin: 0 auto !important;
+                pointer-events: none !important;
+                z-index: 2 !important;
+            }
+
+            /* Fallback para avatares vectoriales por defecto */
+            body.wa-sidebar-compact #pane-side span[data-icon="default-user"] svg,
+            body.wa-sidebar-compact #pane-side span[data-icon="default-group"] svg {
+                position: static !important;
+                transform: none !important;
+                width: 49px !important;
+                height: 49px !important;
+                border-radius: 50% !important;
+            }
+
+            body.wa-sidebar-compact #pane-side span[data-icon="community-outline"] svg {
+                position: static !important;
+                transform: none !important;
+                width: 49px !important;
+                height: 49px !important;
+                border-radius: 30% !important;
+            }
+
+            body.wa-sidebar-compact #pane-side [role="row"][aria-selected="true"],
+            body.wa-sidebar-compact #pane-side [role="listitem"][aria-selected="true"],
+            body.wa-sidebar-compact #pane-side [role="row"]:has([aria-selected="true"]),
+            body.wa-sidebar-compact #pane-side [role="listitem"]:has([aria-selected="true"]) {
+                border-left: 3px solid #00a884 !important;
+                background: rgba(134, 150, 160, 0.15) !important;
+            }
+
+            body.wa-sidebar-compact #side header {
+                padding: 10px 0 !important;
+                display: flex !important;
+                justify-content: center !important;
+                align-items: center !important;
+                box-sizing: border-box !important;
+            }
+
+            body.wa-sidebar-compact #side header > :not(.wa-compact-toggle-wrapper) {
+                display: none !important;
+            }
+
+            .wa-compact-toggle-wrapper {
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                margin: 0 4px !important;
+                padding: 0 !important;
+                vertical-align: middle !important;
+            }
+
+            body.wa-sidebar-compact .wa-compact-toggle-wrapper {
+                margin: 0 auto !important;
+                width: 100% !important;
+            }
+
+            .wa-compact-toggle-btn {
+                display: inline-flex !important;
+                align-items: center !important;
+                justify-content: center !important;
+                width: 36px !important;
+                height: 36px !important;
+                border-radius: 50% !important;
+                border: none !important;
+                outline: none !important;
+                background: transparent !important;
+                color: var(--icon-fixed, #8696a0) !important;
+                cursor: pointer !important;
+                padding: 0 !important;
+                margin: 0 auto !important;
+                transition: background-color 0.15s ease, color 0.15s ease, transform 0.15s ease !important;
+                user-select: none !important;
+                -webkit-user-select: none !important;
+            }
+
+            .wa-compact-toggle-btn:hover {
+                background-color: rgba(134, 150, 160, 0.15) !important;
+                color: var(--icon-high-emphasis, #d1d7db) !important;
+            }
+
+            .wa-compact-toggle-btn:active {
+                transform: scale(0.92) !important;
+            }
+
+            .wa-compact-toggle-btn svg {
+                width: 20px !important;
+                height: 20px !important;
+                fill: currentColor !important;
+                pointer-events: none !important;
+            }
+        `;
+        document.head.appendChild(style);
+    }
+
+    function getMaxWidth() {
+        return Math.floor(window.innerWidth * 0.5);
+    }
+
+    function getSavedWidth() {
+        var saved = localStorage.getItem(STORAGE_KEY_WIDTH);
+        var parsed = parseInt(saved, 10);
+        if (isNaN(parsed) || parsed < MIN_WIDTH) {
+            return DEFAULT_WIDTH;
+        }
+        var max = getMaxWidth();
+        if (parsed > max) {
+            return max;
+        }
+        return parsed;
+    }
+
+    function isCompactActive() {
+        return document.body.classList.contains('wa-sidebar-compact');
+    }
+
+    function updateButtonAppearance(btn, isCompact) {
+        if (!btn) return;
+        btn.innerHTML = isCompact ? SVG_EXPAND : SVG_COLLAPSE;
+        var label = isCompact ? 'Expandir barra lateral' : 'Minimizar barra lateral';
+        btn.setAttribute('title', label);
+        btn.setAttribute('aria-label', label);
+    }
+
+    function resolveLayoutContainers() {
+        var side = document.querySelector('#side');
+        if (!side) return null;
+
+        var mainEl = document.querySelector('#main');
+        var isCacheValid = cachedSideColumn && cachedSideColumn.isConnected &&
+                           cachedFlexContainer && cachedFlexContainer.isConnected &&
+                           cachedSideColumn.parentElement === cachedFlexContainer &&
+                           (!mainEl || (cachedMainColumn && cachedMainColumn.isConnected && cachedMainColumn.contains(mainEl)));
+
+        if (isCacheValid) {
+            return {
+                side: side,
+                sideColumn: cachedSideColumn,
+                mainColumn: cachedMainColumn,
+                flexContainer: cachedFlexContainer
+            };
+        }
+
+        var sideCol = side;
+        var mainCol = null;
+        var container = null;
+
+        var curr = side;
+        while (curr && curr !== document.body && curr !== document.documentElement) {
+            var p = curr.parentElement;
+            if (!p) break;
+
+            var isMainWrapper = p.classList.contains('two') || 
+                                p.classList.contains('three') || 
+                                p.classList.contains('app-wrapper-web') ||
+                                p.id === 'app' ||
+                                (p.parentElement && p.parentElement.id === 'app');
+
+            var pStyle = window.getComputedStyle(p);
+            var isFlexRow = pStyle.display.indexOf('flex') !== -1 && 
+                            (pStyle.flexDirection === 'row' || pStyle.flexDirection === '');
+            var isGrid = pStyle.display.indexOf('grid') !== -1;
+
+            if (isFlexRow || isGrid || isMainWrapper) {
+                var mainEl = document.querySelector('#main');
+                if (mainEl && p.contains(mainEl) && curr !== mainEl) {
+                    container = p;
+                    sideCol = curr;
+
+                    var m = mainEl;
+                    while (m && m.parentElement !== container) {
+                        m = m.parentElement;
+                    }
+                    mainCol = m;
+                    break;
+                } else if (!mainEl && curr.nextElementSibling) {
+                    container = p;
+                    sideCol = curr;
+                    mainCol = curr.nextElementSibling;
+                    break;
+                }
+            }
+            curr = p;
+        }
+
+        if (sideCol) {
+            cachedSideColumn = sideCol;
+            sideCol.setAttribute('data-wa-side-column', 'true');
+        }
+        if (mainCol) {
+            cachedMainColumn = mainCol;
+            mainCol.setAttribute('data-wa-main-column', 'true');
+        }
+        if (container) {
+            cachedFlexContainer = container;
+            container.setAttribute('data-wa-flex-container', 'true');
+        }
+
+        return {
+            side: side,
+            sideColumn: sideCol,
+            mainColumn: mainCol,
+            flexContainer: container
+        };
+    }
+
+    function setSidebarWidth(width, persist) {
+        var max = getMaxWidth();
+        var clamped = Math.max(MIN_WIDTH, Math.min(width, max));
+
+        document.documentElement.style.setProperty('--wa-sidebar-width', clamped + 'px');
+
+        var containers = resolveLayoutContainers();
+        if (containers && !isCompactActive()) {
+            var side = containers.side;
+            var sideCol = containers.sideColumn;
+            var mainCol = containers.mainColumn;
+
+            if (sideCol) {
+                sideCol.style.setProperty('width', clamped + 'px', 'important');
+                sideCol.style.setProperty('min-width', clamped + 'px', 'important');
+                sideCol.style.setProperty('max-width', clamped + 'px', 'important');
+                sideCol.style.setProperty('flex-basis', clamped + 'px', 'important');
+                sideCol.style.setProperty('flex-grow', '0', 'important');
+                sideCol.style.setProperty('flex-shrink', '0', 'important');
+            }
+
+            if (side && side !== sideCol) {
+                side.style.setProperty('width', '100%', 'important');
+                side.style.setProperty('min-width', '100%', 'important');
+                side.style.setProperty('max-width', '100%', 'important');
+                side.style.setProperty('flex-basis', '100%', 'important');
+                side.style.setProperty('flex-grow', '1', 'important');
+                side.style.setProperty('flex-shrink', '1', 'important');
+            } else if (side) {
+                side.style.setProperty('width', clamped + 'px', 'important');
+                side.style.setProperty('min-width', clamped + 'px', 'important');
+                side.style.setProperty('max-width', clamped + 'px', 'important');
+                side.style.setProperty('flex-basis', clamped + 'px', 'important');
+            }
+
+            if (mainCol) {
+                mainCol.style.setProperty('flex', '1 1 0%', 'important');
+                mainCol.style.setProperty('flex-grow', '1', 'important');
+                mainCol.style.setProperty('flex-shrink', '1', 'important');
+                mainCol.style.setProperty('min-width', '0', 'important');
+                mainCol.style.setProperty('width', 'auto', 'important');
+                mainCol.style.setProperty('max-width', 'none', 'important');
+            }
+
+            var mainEl = document.querySelector('#main');
+            if (mainEl && mainEl !== mainCol) {
+                mainEl.style.setProperty('width', '100%', 'important');
+                mainEl.style.setProperty('height', '100%', 'important');
+                mainEl.style.setProperty('min-width', '0', 'important');
+                mainEl.style.setProperty('flex', '1 1 auto', 'important');
+            }
+
+            // Neutralizar cualquier cajon lateral auxiliar derecho que este cerrado
+            var container = containers.flexContainer;
+            if (container) {
+                var children = container.children;
+                for (var i = 0; i < children.length; i++) {
+                    var child = children[i];
+                    if (child !== sideCol && child !== mainCol && !child.contains(side) && (!mainEl || !child.contains(mainEl))) {
+                        if (child.children.length === 0 || child.offsetWidth === 0) {
+                            child.style.setProperty('flex', '0 0 0px', 'important');
+                            child.style.setProperty('flex-grow', '0', 'important');
+                            child.style.setProperty('width', '0px', 'important');
+                            child.style.setProperty('max-width', '0px', 'important');
+                        }
+                    }
+                }
+            }
+        }
+
+        if (persist) {
+            localStorage.setItem(STORAGE_KEY_WIDTH, clamped.toString());
+        }
+
+        updateResizerPosition();
+    }
+
+    function updateResizerPosition() {
+        if (!resizerElement) return;
+
+        if (isCompactActive()) {
+            resizerElement.style.display = 'none';
+            resizerElement.style.left = '-9999px';
+            return;
+        }
+
+        var containers = resolveLayoutContainers();
+        var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
+        if (!targetEl) {
+            resizerElement.style.display = 'none';
+            resizerElement.style.left = '-9999px';
+            return;
+        }
+
+        var rect = targetEl.getBoundingClientRect();
+        if (rect.width === 0 || rect.height === 0) {
+            resizerElement.style.display = 'none';
+            resizerElement.style.left = '-9999px';
+            return;
+        }
+
+        resizerElement.style.display = 'block';
+        resizerElement.style.top = rect.top + 'px';
+        resizerElement.style.height = rect.height + 'px';
+        resizerElement.style.left = rect.right + 'px';
+    }
+
+    function onMouseDown(e) {
+        if (e.button !== 0 || isCompactActive()) return;
+        e.preventDefault();
+
+        isDragging = true;
+        if (resizerElement) {
+            resizerElement.classList.add('is-resizing');
+        }
+        document.documentElement.classList.add('wa-resizing-active');
+
+        window.addEventListener('mousemove', onMouseMove, { passive: false, capture: true });
+        window.addEventListener('mouseup', onMouseUp, { once: true, capture: true });
+    }
+
+    function onMouseMove(e) {
+        if (!isDragging) return;
+        e.preventDefault();
+        targetClientX = e.clientX;
+
+        if (!rafPending) {
+            rafPending = true;
+            window.requestAnimationFrame(function() {
+                rafPending = false;
+                if (!isDragging) return;
+
+                var containers = resolveLayoutContainers();
+                var sideCol = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
+                if (!sideCol) return;
+
+                var sideLeft = sideCol.getBoundingClientRect().left;
+                var calculatedWidth = targetClientX - sideLeft;
+
+                setSidebarWidth(calculatedWidth, false);
+            });
+        }
+    }
+
+    function onMouseUp(e) {
+        if (!isDragging) return;
+        isDragging = false;
+
+        if (resizerElement) {
+            resizerElement.classList.remove('is-resizing');
+        }
+        document.documentElement.classList.remove('wa-resizing-active');
+
+        window.removeEventListener('mousemove', onMouseMove, { capture: true });
+
+        var containers = resolveLayoutContainers();
+        var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
+        if (targetEl) {
+            var currentWidth = Math.round(targetEl.getBoundingClientRect().width);
+            setSidebarWidth(currentWidth, true);
+        }
+    }
+
+    window.__waSetSidebarCompact = function(targetCompact) {
+        var currentlyCompact = isCompactActive();
+        if (targetCompact === currentlyCompact) return;
+
+        var containers = resolveLayoutContainers();
+        var side = (containers && containers.side) ? containers.side : document.querySelector('#side');
+        var sideCol = (containers && containers.sideColumn) ? containers.sideColumn : side;
+        var mainCol = (containers && containers.mainColumn) ? containers.mainColumn : null;
+
+        if (targetCompact) {
+            if (sideCol && sideCol.offsetWidth >= MIN_WIDTH) {
+                var widthVal = Math.round(sideCol.getBoundingClientRect().width);
+                localStorage.setItem(STORAGE_KEY_WIDTH, widthVal.toString());
+            }
+            document.body.classList.add('wa-sidebar-compact');
+            localStorage.setItem(STORAGE_KEY_COMPACT, 'true');
+            document.documentElement.style.setProperty('--wa-sidebar-width', '70px');
+
+            if (sideCol) {
+                sideCol.style.setProperty('width', '70px', 'important');
+                sideCol.style.setProperty('min-width', '70px', 'important');
+                sideCol.style.setProperty('max-width', '70px', 'important');
+                sideCol.style.setProperty('flex-basis', '70px', 'important');
+                sideCol.style.setProperty('overflow', 'hidden', 'important');
+                sideCol.style.setProperty('border-right', 'none', 'important');
+            }
+            if (side && side !== sideCol) {
+                side.style.setProperty('width', '70px', 'important');
+                side.style.setProperty('min-width', '70px', 'important');
+                side.style.setProperty('max-width', '70px', 'important');
+                side.style.setProperty('flex-basis', '70px', 'important');
+                side.style.setProperty('overflow', 'hidden', 'important');
+                side.style.setProperty('border-right', 'none', 'important');
+            }
+            if (resizerElement) {
+                resizerElement.style.display = 'none';
+                resizerElement.style.left = '-9999px';
+            }
+            if (mainCol) {
+                mainCol.style.setProperty('flex', '1 1 0%', 'important');
+                mainCol.style.setProperty('flex-grow', '1', 'important');
+                mainCol.style.setProperty('min-width', '0', 'important');
+                mainCol.style.setProperty('width', 'auto', 'important');
+                mainCol.style.setProperty('max-width', 'none', 'important');
+            }
+            var container = (containers && containers.flexContainer) ? containers.flexContainer : null;
+            if (container) {
+                var children = container.children;
+                for (var i = 0; i < children.length; i++) {
+                    var child = children[i];
+                    if (child !== sideCol && child !== mainCol && !child.contains(side) && (!document.querySelector('#main') || !child.contains(document.querySelector('#main')))) {
+                        if (child.children.length === 0 || child.offsetWidth === 0) {
+                            child.style.setProperty('flex', '0 0 0px', 'important');
+                            child.style.setProperty('flex-grow', '0', 'important');
+                            child.style.setProperty('width', '0px', 'important');
+                            child.style.setProperty('max-width', '0px', 'important');
+                        }
+                    }
+                }
+            }
+        } else {
+            document.body.classList.remove('wa-sidebar-compact');
+            localStorage.setItem(STORAGE_KEY_COMPACT, 'false');
+            var savedWidth = getSavedWidth();
+            document.documentElement.style.setProperty('--wa-sidebar-width', savedWidth + 'px');
+            setSidebarWidth(savedWidth, false);
+        }
+
+        var btn = document.querySelector('.wa-compact-toggle-btn');
+        if (btn) {
+            updateButtonAppearance(btn, targetCompact);
+        }
+
+        updateResizerPosition();
+    };
+
+    window.__waToggleSidebarCompact = function() {
+        window.__waSetSidebarCompact(!isCompactActive());
+    };
+
+    function ensureToggleButton() {
+        var existingBtn = document.querySelector('.wa-compact-toggle-btn');
+        if (existingBtn && existingBtn.isConnected) {
+            updateButtonAppearance(existingBtn, isCompactActive());
+            return true;
+        }
+
+        var header = document.querySelector('#side header');
+        if (!header) return false;
+
+        var wrapper = document.createElement('div');
+        wrapper.className = 'wa-compact-toggle-wrapper';
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'wa-compact-toggle-btn';
+        updateButtonAppearance(btn, isCompactActive());
+
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.__waToggleSidebarCompact();
+        });
+
+        wrapper.appendChild(btn);
+
+        var buttons = header.querySelectorAll('div[role="button"], button');
+        var targetContainer = null;
+        if (buttons.length > 0) {
+            var lastBtn = buttons[buttons.length - 1];
+            targetContainer = lastBtn.closest('div');
+        }
+
+        if (targetContainer && targetContainer !== header) {
+            targetContainer.insertBefore(wrapper, targetContainer.firstChild);
+        } else {
+            header.appendChild(wrapper);
+        }
+
+        return true;
+    }
+
+    function syncAvatarTooltips() {
+        if (!isCompactActive()) return;
+        var pane = document.getElementById('pane-side');
+        if (!pane) return;
+
+        var rows = pane.querySelectorAll('[role="row"], [role="listitem"], div[data-testid="cell-frame-container"]');
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+            if (row.hasAttribute('title')) continue;
+            var titleEl = row.querySelector('span[title]') || 
+                          row.querySelector('[data-testid="cell-frame-title"]') ||
+                          row.querySelector('span[dir="auto"]');
+            if (titleEl) {
+                var name = titleEl.getAttribute('title') || titleEl.textContent || '';
+                if (name.trim()) {
+                    row.setAttribute('title', name.trim());
+                }
+            }
+        }
+    }
+
+    function initResizer() {
+        var side = document.querySelector('#side');
+        if (!side) return false;
+
+        resolveLayoutContainers();
+
+        if (!resizerElement || !document.body.contains(resizerElement)) {
+            resizerElement = document.getElementById('wa-custom-resizer');
+            if (!resizerElement) {
+                resizerElement = document.createElement('div');
+                resizerElement.id = 'wa-custom-resizer';
+                resizerElement.setAttribute('role', 'separator');
+                resizerElement.setAttribute('aria-orientation', 'vertical');
+                resizerElement.setAttribute('title', 'Arrastra para redimensionar el panel lateral');
+                document.body.appendChild(resizerElement);
+            }
+            resizerElement.removeEventListener('mousedown', onMouseDown);
+            resizerElement.addEventListener('mousedown', onMouseDown);
+        }
+
+        var containers = resolveLayoutContainers();
+        var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : side;
+
+        if (window.ResizeObserver && targetEl && !targetEl.__waResizeObserverAttached) {
+            targetEl.__waResizeObserverAttached = true;
+            var resizeObserver = new ResizeObserver(function() {
+                if (!isDragging) {
+                    updateResizerPosition();
+                }
+            });
+            resizeObserver.observe(targetEl);
+        }
+
+        updateResizerPosition();
+        return true;
+    }
+
+    injectStyles();
+
+    function applyCompactInline() {
+        var c = resolveLayoutContainers();
+        if (!c) return;
+        [c.sideColumn, c.side].forEach(function(el) {
+            if (!el || el.__waCompactApplied) return;
+            el.__waCompactApplied = true;
+            el.style.setProperty('width', '70px', 'important');
+            el.style.setProperty('flex-basis', '70px', 'important');
+            el.style.setProperty('border-right', 'none', 'important');
+        });
+    }
+
+    var savedCompact = localStorage.getItem(STORAGE_KEY_COMPACT);
+    if (savedCompact === 'true') {
+        document.body.classList.add('wa-sidebar-compact');
+        document.documentElement.style.setProperty('--wa-sidebar-width', '70px');
+        applyCompactInline();
+    } else {
+        var initialWidth = getSavedWidth();
+        setSidebarWidth(initialWidth, false);
+    }
+
+    initResizer();
+    ensureToggleButton();
+    syncAvatarTooltips();
+
+    var observer = new MutationObserver(function() {
+        ensureToggleButton();
+        syncAvatarTooltips();
+        if (!isCompactActive()) {
+            initResizer();
+        } else if (document.querySelector('#side') &&
+                   (!document.querySelector('[data-wa-side-column="true"]') ||
+                    !document.querySelector('#side').__waCompactApplied)) {
+            // #side monto despues del arranque en modo compacto: reaplicar contenedores y anchos
+            applyCompactInline();
+        }
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    window.addEventListener('resize', function() {
+        if (!isCompactActive()) {
+            var curWidth = getSavedWidth();
+            setSidebarWidth(curWidth, false);
+        }
+    });
+})();
+)JS");
+}
