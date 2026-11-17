@@ -433,11 +433,21 @@ void WhatsAppClient::trayActivated(QSystemTrayIcon::ActivationReason reason) {
 }
 
 void WhatsAppClient::closeEvent(QCloseEvent *event) {
+    if (m_altKeyDown) {
+        m_altKeyDown = false;
+        m_wheelAccumulatedDelta = 0;
+        hideChatBadges();
+    }
     event->ignore();
     hide();
 }
 
 void WhatsAppClient::hideEvent(QHideEvent *event) {
+    if (m_altKeyDown) {
+        m_altKeyDown = false;
+        m_wheelAccumulatedDelta = 0;
+        hideChatBadges();
+    }
     QMainWindow::hideEvent(event);
     if (m_browser && m_browser->page()) {
         // Reducir consumo de recursos al ocultar
@@ -446,6 +456,11 @@ void WhatsAppClient::hideEvent(QHideEvent *event) {
 
 void WhatsAppClient::showEvent(QShowEvent *event) {
     QMainWindow::showEvent(event);
+    if (!(QApplication::keyboardModifiers() & (Qt::AltModifier | Qt::GroupSwitchModifier))) {
+        m_altKeyDown = false;
+        m_wheelAccumulatedDelta = 0;
+        hideChatBadges();
+    }
     if (m_browser && m_browser->page()) {
         m_browser->page()->setLifecycleState(QWebEnginePage::LifecycleState::Active);
     }
@@ -472,11 +487,14 @@ void WhatsAppClient::resizeEvent(QResizeEvent *event) {
 void WhatsAppClient::wheelEvent(QWheelEvent *event) {
     Qt::KeyboardModifiers mods = event->modifiers();
     Qt::KeyboardModifiers appMods = QApplication::keyboardModifiers();
-    bool altPressed = m_altKeyDown ||
-                      (mods & Qt::AltModifier) || 
-                      (appMods & Qt::AltModifier) || 
-                      (mods & Qt::GroupSwitchModifier) || 
-                      (appMods & Qt::GroupSwitchModifier);
+    bool sysAlt = (mods & (Qt::AltModifier | Qt::GroupSwitchModifier)) ||
+                  (appMods & (Qt::AltModifier | Qt::GroupSwitchModifier));
+    if (m_altKeyDown && !sysAlt) {
+        m_altKeyDown = false;
+        m_wheelAccumulatedDelta = 0;
+        hideChatBadges();
+    }
+    bool altPressed = sysAlt;
 
     if (altPressed) {
         int delta = event->angleDelta().y();
@@ -537,17 +555,29 @@ bool WhatsAppClient::isPrivacyActive() const {
 
 bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
     if (QApplication::activeModalWidget() != nullptr) {
+        if (m_altKeyDown) {
+            m_altKeyDown = false;
+            m_wheelAccumulatedDelta = 0;
+            hideChatBadges();
+        }
         return QMainWindow::eventFilter(obj, event);
     }
 
     QEvent::Type etype = event->type();
 
-    // Solo la desactivacion real de la ventana oculta los badges. Los FocusOut internos
-    // entre sub-widgets de Qt WebEngine (recibidos via qApp) no deben ocultarlos/recrearlos.
-    if (etype == QEvent::WindowDeactivate && obj == this) {
+    // Solo la desactivacion real de la ventana/aplicacion oculta los badges.
+    if ((etype == QEvent::WindowDeactivate && obj == this) || etype == QEvent::ApplicationDeactivate) {
         m_wheelAccumulatedDelta = 0;
         if (m_altKeyDown) {
             m_altKeyDown = false;
+            hideChatBadges();
+        }
+    }
+
+    if (etype == QEvent::MouseButtonPress && m_altKeyDown) {
+        if (!(QApplication::keyboardModifiers() & (Qt::AltModifier | Qt::GroupSwitchModifier))) {
+            m_altKeyDown = false;
+            m_wheelAccumulatedDelta = 0;
             hideChatBadges();
         }
     }
@@ -563,11 +593,14 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
         auto *wheelEv = static_cast<QWheelEvent *>(event);
         Qt::KeyboardModifiers mods = wheelEv->modifiers();
         Qt::KeyboardModifiers appMods = QApplication::keyboardModifiers();
-        bool altPressed = m_altKeyDown ||
-                          (mods & Qt::AltModifier) || 
-                          (appMods & Qt::AltModifier) || 
-                          (mods & Qt::GroupSwitchModifier) || 
-                          (appMods & Qt::GroupSwitchModifier);
+        bool sysAlt = (mods & (Qt::AltModifier | Qt::GroupSwitchModifier)) ||
+                      (appMods & (Qt::AltModifier | Qt::GroupSwitchModifier));
+        if (m_altKeyDown && !sysAlt) {
+            m_altKeyDown = false;
+            m_wheelAccumulatedDelta = 0;
+            hideChatBadges();
+        }
+        bool altPressed = sysAlt;
 
         if (altPressed) {
             int delta = wheelEv->angleDelta().y();
@@ -647,6 +680,13 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
                     showChatBadges();
                 }
             }
+        } else if (m_altKeyDown &&
+                   keyEvent->key() != Qt::Key_Alt &&
+                   keyEvent->key() != Qt::Key_AltGr &&
+                   !(keyEvent->modifiers() & (Qt::AltModifier | Qt::GroupSwitchModifier))) {
+            m_altKeyDown = false;
+            m_wheelAccumulatedDelta = 0;
+            hideChatBadges();
         }
     } else if (etype == QEvent::KeyRelease) {
         auto *keyEvent = static_cast<QKeyEvent *>(event);
@@ -887,9 +927,13 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
 
     // 2. Funcion para obtener chats validos ignorando completamente la pestana de Archivados
     // y capturando todas las conversaciones visibles (fijadas, propias y normales) en su orden visual exacto.
-    window.__waGetValidChats = function() {
+    window.__waGetValidChats = function(skipViewportFilter) {
+        if (window.__waEnsurePaneListeners) {
+            window.__waEnsurePaneListeners();
+        }
         var pane = document.getElementById('pane-side');
         if (!pane) return [];
+        var paneRect = pane.getBoundingClientRect();
 
         var rawList = [];
 
@@ -986,6 +1030,14 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
                 continue;
             }
 
+            if (!skipViewportFilter && paneRect.height > 0) {
+                var elRect = el.getBoundingClientRect();
+                var centerY = elRect.top + (elRect.height / 2);
+                if (centerY < paneRect.top || centerY > paneRect.bottom) {
+                    continue;
+                }
+            }
+
             validChats.push(el);
         }
 
@@ -1039,7 +1091,7 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
 
             // 3. Icono o SVG de avatar (contactos o chats propios sin foto de perfil personalizada)
             if (!candidate) {
-                var icons = chatRow.querySelectorAll('span[data-icon="default-user"], span[data-icon="community-outline"], span[data-icon*="avatar"], svg');
+                var icons = chatRow.querySelectorAll('span[data-icon="default-user"], span[data-icon="community-outline"], span[data-icon*="avatar"], span[data-icon*="default-"], span[data-icon*="channel"], span[data-icon*="newsletter"], svg');
                 for (var ic = 0; ic < icons.length; ic++) {
                     var icRect = icons[ic].getBoundingClientRect();
                     if ((icRect.left - rowRect.left) < 75 && icRect.width >= 20) {
@@ -1120,8 +1172,14 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
     };
 
     // 5. Funcion unificada de seleccion y clic simulado 100% compatible con React 18
-    window.__waSelectChatElement = function(target) {
+    window.__waSelectChatElement = function(target, preserveSeenState) {
         if (!target) return;
+
+        var isAlreadySelected = (target.getAttribute && target.getAttribute('aria-selected') === 'true') ||
+                                (target.querySelector && target.querySelector('[aria-selected="true"]') !== null);
+        if (!preserveSeenState && !window.__waMarkingSeenActive && !isAlreadySelected && window.__waCancelTemporarySeen) {
+            window.__waCancelTemporarySeen();
+        }
 
         // Priorizar el texto del nombre del chat (span[title], div[data-testid="cell-frame-title"], span[dir="auto"])
         // verificando que sea visible; si no es visible (como en modo compacto), clicar el contenedor de la fila
@@ -1186,6 +1244,10 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
 
         if (typeof target.scrollIntoView === 'function') {
             target.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+        }
+
+        if (!preserveSeenState && !window.__waMarkingSeenActive && typeof window.__waScheduleReadOnlyChatCheck === 'function') {
+            window.__waScheduleReadOnlyChatCheck();
         }
     };
 
@@ -1260,6 +1322,9 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
         }
 
         if (targetIndex === currentIndex && currentIndex !== -1) {
+            if (window.__waShowAltBadges && window.__waAltKeyDown) {
+                window.__waShowAltBadges();
+            }
             return targetIndex;
         }
 
@@ -1277,9 +1342,114 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
 
         if (window.__waShowAltBadges && window.__waAltKeyDown) {
             window.__waShowAltBadges();
+            setTimeout(function() { if (window.__waAltKeyDown && window.__waShowAltBadges) window.__waShowAltBadges(); }, 90);
+            setTimeout(function() { if (window.__waAltKeyDown && window.__waShowAltBadges) window.__waShowAltBadges(); }, 240);
         }
 
         return targetIndex;
+    };
+
+    // 7b. Busqueda de chat por nombre con scroll progresivo sobre la lista virtualizada de #pane-side
+    window.__waFindChatTimer = null;
+    window.__waFindAndOpenChat = function(targetName, onFoundCallback) {
+        if (window.__waFindChatTimer) {
+            clearTimeout(window.__waFindChatTimer);
+            window.__waFindChatTimer = null;
+        }
+
+        var norm = function(s) {
+            return (s || '')
+                .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+                .replace(/\s*\((tú|you|tu)\)\s*/gi, '')
+                .trim()
+                .toLowerCase();
+        };
+        var wanted = norm(targetName);
+        if (!wanted) return -1;
+
+        var matchRow = function(row) {
+            var t = row.querySelector('span[title]') ||
+                    row.querySelector('div[data-testid="cell-frame-title"] span') ||
+                    row.querySelector('span[dir="auto"]');
+            var raw = t ? (t.getAttribute('title') || t.textContent || '') : (row.getAttribute('title') || '');
+            return norm(raw) === wanted;
+        };
+
+        var tryFindInDom = function() {
+            var chats = window.__waGetValidChats ? window.__waGetValidChats(true) : [];
+            for (var i = 0; i < chats.length; i++) {
+                if (matchRow(chats[i])) {
+                    window.__waCurrentChatIndex = i;
+                    return chats[i];
+                }
+            }
+            var fallbackRows = document.querySelectorAll('#pane-side [role="row"], #pane-side [role="listitem"]');
+            for (var j = 0; j < fallbackRows.length; j++) {
+                if (matchRow(fallbackRows[j])) {
+                    return fallbackRows[j];
+                }
+            }
+            return null;
+        };
+
+        var immediate = tryFindInDom();
+        if (immediate) {
+            window.__waSelectChatElement(immediate);
+            if (typeof onFoundCallback === 'function') {
+                onFoundCallback(immediate);
+            }
+            return 1;
+        }
+
+        var pane = document.getElementById('pane-side');
+        if (!pane || pane.scrollHeight <= pane.clientHeight) {
+            return -1;
+        }
+
+        var originalScrollTop = pane.scrollTop;
+        var maxSteps = 25;
+        var stepCount = 0;
+        var stepSize = Math.max(250, Math.floor(pane.clientHeight * 0.75));
+        var maxScroll = Math.max(0, pane.scrollHeight - pane.clientHeight);
+
+        if (originalScrollTop > 0) {
+            pane.scrollTop = 0;
+        } else {
+            pane.scrollTop = Math.min(stepSize, maxScroll);
+        }
+        stepCount = 1;
+
+        var stepSearch = function() {
+            window.__waFindChatTimer = null;
+            var hit = tryFindInDom();
+            if (hit) {
+                window.__waSelectChatElement(hit);
+                if (typeof onFoundCallback === 'function') {
+                    onFoundCallback(hit);
+                }
+                return;
+            }
+
+            var curMaxScroll = Math.max(0, pane.scrollHeight - pane.clientHeight);
+            if (pane.scrollTop >= curMaxScroll - 2 || stepCount >= maxSteps) {
+                pane.scrollTop = originalScrollTop;
+                return;
+            }
+
+            var curStep = Math.max(250, Math.floor(pane.clientHeight * 0.75));
+            var nextScroll = Math.min(pane.scrollTop + curStep, curMaxScroll);
+            if (nextScroll <= pane.scrollTop) {
+                pane.scrollTop = originalScrollTop;
+                return;
+            }
+
+            pane.scrollTop = nextScroll;
+            stepCount++;
+            window.__waFindChatTimer = setTimeout(stepSearch, 60);
+        };
+
+        window.__waFindChatTimer = setTimeout(stepSearch, 60);
+        return 0;
     };
 
     // 8. Escuchadores directos de teclado y rueda dentro de la ventana web
@@ -1314,6 +1484,30 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
                 }
             }
         }
+        window.__waHandleWheel = handleWheel;
+
+        window.__waEnsurePaneListeners = function() {
+            var pane = document.getElementById('pane-side');
+            if (!pane) return;
+            if (!pane.__waWheelAttached) {
+                pane.__waWheelAttached = true;
+                pane.addEventListener('wheel', window.__waHandleWheel, { passive: false, capture: true });
+            }
+            if (!pane.__waScrollBadgeAttached) {
+                pane.__waScrollBadgeAttached = true;
+                var badgeRaf = false;
+                pane.addEventListener('scroll', function() {
+                    if (!window.__waAltKeyDown || badgeRaf) return;
+                    badgeRaf = true;
+                    window.requestAnimationFrame(function() {
+                        badgeRaf = false;
+                        if (window.__waAltKeyDown && window.__waShowAltBadges) {
+                            window.__waShowAltBadges();
+                        }
+                    });
+                }, { passive: true });
+            }
+        };
 
         window.addEventListener('keydown', function(e) {
             if (e.key === 'Alt' || e.key === 'AltGraph') {
@@ -1331,18 +1525,17 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
         }, true);
 
         window.addEventListener('blur', function() {
-            window.__waAltKeyDown = false;
-            window.__waHideAltBadges();
+            if (!document.hasFocus()) {
+                window.__waAltKeyDown = false;
+                window.__waHideAltBadges();
+            }
         });
 
         window.addEventListener('wheel', handleWheel, { passive: false, capture: true });
         document.addEventListener('wheel', handleWheel, { passive: false, capture: true });
-
-        var pane = document.getElementById('pane-side');
-        if (pane && !pane.__waWheelAttached) {
-            pane.__waWheelAttached = true;
-            pane.addEventListener('wheel', handleWheel, { passive: false, capture: true });
-        }
+    }
+    if (window.__waEnsurePaneListeners) {
+        window.__waEnsurePaneListeners();
     }
 })();
 )JS");
@@ -1387,7 +1580,7 @@ void WhatsAppClient::runChatJs(const QString &body, std::function<void(const QVa
     if (!m_browser || !m_browser->page()) {
         return;
     }
-    const QString wrapped = QStringLiteral("(function(){ if (!window.__waGetValidChats || !window.__waSelectChatElement || !window.__waNavigateChat || !window.__waShowAltBadges) { return '__wa_need_init__'; }\n")
+    const QString wrapped = QStringLiteral("(function(){ if (!window.__waGetValidChats || !window.__waSelectChatElement || !window.__waNavigateChat || !window.__waShowAltBadges || !window.__waFindAndOpenChat) { return '__wa_need_init__'; }\n")
                             + body + QStringLiteral("\n})();");
     m_browser->page()->runJavaScript(wrapped, [this, body, callback, retried](const QVariant &result) {
         if (result.toString() == QLatin1String("__wa_need_init__")) {
@@ -1411,7 +1604,7 @@ void WhatsAppClient::navigateChatByOffset(int offset) {
         return;
     }
 
-    runChatJs(QStringLiteral("return window.__waNavigateChat(%1);").arg(offset),
+    runChatJs(QStringLiteral("window.__waAltKeyDown = true; return window.__waNavigateChat(%1);").arg(offset),
               [this](const QVariant &result) {
         bool ok = false;
         int idx = result.toInt(&ok);
@@ -1447,6 +1640,10 @@ void WhatsAppClient::hideChatBadges() {
 void WhatsAppClient::onPageLoaded(bool ok) {
     if (!ok) {
         return;
+    }
+    if (!(QApplication::keyboardModifiers() & (Qt::AltModifier | Qt::GroupSwitchModifier))) {
+        m_altKeyDown = false;
+        m_wheelAccumulatedDelta = 0;
     }
     if (m_browser) {
         m_browser->installEventFilter(this);
@@ -1619,21 +1816,14 @@ void WhatsAppClient::openChat(const QString &chatName) {
 
     QString js = QString(R"JS(
         var targetName = %1;
-        var norm = function(s) { return (s || '').replace(/\s*\((tú|you|tu)\)\s*/gi, '').trim().toLowerCase(); };
-        var wanted = norm(targetName);
-        var chats = window.__waGetValidChats();
-        for (var i = 0; i < chats.length; i++) {
-            var t = chats[i].querySelector('span[title]') ||
-                    chats[i].querySelector('div[data-testid="cell-frame-title"] span') ||
-                    chats[i].querySelector('span[dir="auto"]');
-            var raw = t ? (t.getAttribute('title') || t.textContent || '') : (chats[i].getAttribute('title') || '');
-            if (norm(raw) === wanted) {
-                window.__waCurrentChatIndex = i;
-                window.__waSelectChatElement(chats[i]);
-                return i;
-            }
+        if (window.__waCancelTemporarySeen) {
+            window.__waCancelTemporarySeen();
         }
-        return -1;
+        return window.__waFindAndOpenChat(targetName, function() {
+            if (window.__waScheduleReadOnlyChatCheck) {
+                window.__waScheduleReadOnlyChatCheck();
+            }
+        });
     )JS").arg(jsonChat);
 
     runChatJs(js);
@@ -1652,45 +1842,37 @@ void WhatsAppClient::sendWhatsAppMessage(const QString &chatName, const QString 
 
     QString js = QString(R"JS(
         var targetChat = %1;
-        var norm = function(s) { return (s || '').replace(/\s*\((tú|you|tu)\)\s*/gi, '').trim().toLowerCase(); };
-        var wanted = norm(targetChat);
-        var chats = window.__waGetValidChats();
-        var found = null;
-        for (var i = 0; i < chats.length; i++) {
-            var t = chats[i].querySelector('span[title]') ||
-                    chats[i].querySelector('div[data-testid="cell-frame-title"] span') ||
-                    chats[i].querySelector('span[dir="auto"]');
-            var raw = t ? (t.getAttribute('title') || t.textContent || '') : (chats[i].getAttribute('title') || '');
-            if (norm(raw) === wanted) { found = chats[i]; window.__waCurrentChatIndex = i; break; }
-        }
-        if (!found) return -1;
-        window.__waSelectChatElement(found);
-
-        setTimeout(function() {
-            var composer = document.querySelector('#main footer div[contenteditable="true"]') ||
-                           document.querySelector('div[contenteditable="true"][data-tab="10"]');
-            if (!composer) return;
-            composer.focus();
-            document.execCommand('insertText', false, %2);
-
+        return window.__waFindAndOpenChat(targetChat, function() {
             setTimeout(function() {
-                var sendIcon = document.querySelector('#main footer span[data-icon="send"]') ||
-                               document.querySelector('#main footer span[data-testid="send"]') ||
-                               document.querySelector('span[data-icon="send"]') ||
-                               document.querySelector('span[data-testid="send"]');
-                var btn = sendIcon ? (sendIcon.closest('button') || sendIcon.closest('[role="button"]')) :
-                          document.querySelector('#main footer button[aria-label="Enviar"], #main footer button[aria-label="Send"]');
-                if (!btn) return;
-                btn.click();
-                if (window.__waTriggerTemporarySeen) {
-                    window.__waTriggerTemporarySeen();
-                } else if (window.__waTriggerSeen) {
-                    setTimeout(window.__waTriggerSeen, 200);
-                    setTimeout(window.__waTriggerSeen, 600);
-                }
-            }, 150);
-        }, 400);
-        return 1;
+                var composer = document.querySelector('#main footer div[contenteditable="true"]') ||
+                               document.querySelector('div[contenteditable="true"][data-tab="10"]');
+                if (!composer) return;
+                composer.focus();
+                document.execCommand('insertText', false, %2);
+                try { composer.dispatchEvent(new InputEvent('input', { bubbles: true, data: %2 })); } catch (e) {}
+
+                setTimeout(function() {
+                    var sendIcon = document.querySelector('#main footer span[data-icon="wds-ic-send-filled"]') ||
+                                   document.querySelector('#main footer span[data-icon="send"]') ||
+                                   document.querySelector('#main footer span[data-testid="send"]') ||
+                                   document.querySelector('span[data-icon="wds-ic-send-filled"]') ||
+                                   document.querySelector('span[data-icon="send"]') ||
+                                   document.querySelector('span[data-testid="send"]');
+                    var btn = sendIcon ? (sendIcon.closest('button') || sendIcon.closest('[role="button"]')) :
+                              (document.querySelector('#main footer button[data-testid="compose-btn-send"]') ||
+                               document.querySelector('#main footer button[data-tab="11"]') ||
+                               document.querySelector('#main footer button[aria-label="Enviar"], #main footer button[aria-label="Send"]'));
+                    if (!btn) return;
+                    btn.click();
+                    if (window.__waTriggerTemporarySeen) {
+                        window.__waTriggerTemporarySeen();
+                    } else if (window.__waTriggerSeen) {
+                        setTimeout(window.__waTriggerSeen, 200);
+                        setTimeout(window.__waTriggerSeen, 600);
+                    }
+                }, 150);
+            }, 400);
+        });
     )JS").arg(jsonChat, jsonText);
 
     runChatJs(js);
@@ -1708,19 +1890,27 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
     window.__waHasRepliedInCurrentChat = false;
 
     var seenResetTimer = null;
+    var readOnlyCheckTimer1 = null;
+    var readOnlyCheckTimer2 = null;
+    var lastContextRow = null;
+    var lastContextRowTime = 0;
+
+    var clearReadOnlyCheckTimers = function() {
+        if (readOnlyCheckTimer1) {
+            clearTimeout(readOnlyCheckTimer1);
+            readOnlyCheckTimer1 = null;
+        }
+        if (readOnlyCheckTimer2) {
+            clearTimeout(readOnlyCheckTimer2);
+            readOnlyCheckTimer2 = null;
+        }
+    };
 
     // Interceptar hasFocus: WhatsApp Web solo envia confirmaciones de lectura (doble check azul)
     // cuando el documento reporta foco activo. Al devolver false de forma predeterminada,
     // se mantiene la lectura de mensajes en modo incognito (doble check gris para el remitente).
     var customHasFocus = function() {
-        if (window.__waMarkingSeenActive) {
-            return true;
-        }
-        // Permitir foco si el usuario esta interactuando con menus contextuales
-        if (document.querySelector('[data-animate-dropdown-item="true"]') || document.querySelector('div[role="menu"]')) {
-            return true;
-        }
-        return false;
+        return !!window.__waMarkingSeenActive;
     };
 
     try {
@@ -1728,12 +1918,21 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
     } catch (e) {}
     document.hasFocus = customHasFocus;
 
+    var dispatchFocusEvents = function() {
+        try {
+            window.dispatchEvent(new FocusEvent('focus'));
+            window.dispatchEvent(new Event('focus'));
+            document.dispatchEvent(new Event('visibilitychange'));
+        } catch (e) {}
+    };
+
     // Cancelar cualquier ventana activa de marcado de lectura y volver a modo incognito
     window.__waCancelTemporarySeen = function() {
         if (seenResetTimer) {
             clearTimeout(seenResetTimer);
             seenResetTimer = null;
         }
+        clearReadOnlyCheckTimers();
         window.__waMarkingSeenActive = false;
         window.__waHasRepliedInCurrentChat = false;
         try {
@@ -1743,13 +1942,13 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
     };
 
     // Funcion central para forzar la emision de read receipts en WhatsApp Web sobre el chat activo
-    window.__waTriggerSeenCore = function() {
+    window.__waTriggerSeenCore = function(skipRowReselect) {
         // 1. Notificar eventos de foco a nivel de ventana y documento
-        try {
-            window.dispatchEvent(new FocusEvent('focus'));
-            window.dispatchEvent(new Event('focus'));
-            document.dispatchEvent(new Event('visibilitychange'));
-        } catch (e) {}
+        dispatchFocusEvents();
+
+        if (skipRowReselect) {
+            return;
+        }
 
         // 2. Re-despachar seleccion sobre el chat activo en la lista lateral (#pane-side)
         var activeRow = document.querySelector('#pane-side [aria-selected="true"]');
@@ -1766,7 +1965,7 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
                     for (var i = 0; i < allSpans.length; i++) {
                         var text = (allSpans[i].getAttribute('title') || allSpans[i].innerText || allSpans[i].textContent || '').trim().toLowerCase();
                         if (text === activeTitle) {
-                            activeRow = allSpans[i].closest('[role="listitem"]') || allSpans[i].closest('div[data-testid="cell-frame-container"]') || allSpans[i];
+                            activeRow = allSpans[i].closest('[role="row"], [role="listitem"]') || allSpans[i].closest('div[data-testid="cell-frame-container"]') || allSpans[i];
                             break;
                         }
                     }
@@ -1776,7 +1975,7 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
 
         if (activeRow) {
             if (window.__waSelectChatElement) {
-                window.__waSelectChatElement(activeRow);
+                window.__waSelectChatElement(activeRow, true);
             } else {
                 var clickTarget = activeRow.querySelector('div[data-testid="cell-frame-container"]') || activeRow;
                 ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(function(evtName) {
@@ -1790,11 +1989,11 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
             }
         }
 
-        // 3. Restaurar foco en el campo de texto del mensaje
+        // 3. Restaurar foco en el campo de texto de #main solo si existe y no esta enfocado ya
         setTimeout(function() {
-            var composer = document.querySelector('footer div[contenteditable="true"]') ||
-                           document.querySelector('div[contenteditable="true"][data-tab="10"]');
-            if (composer) {
+            var composer = document.querySelector('#main footer div[contenteditable="true"]') ||
+                           document.querySelector('#main div[contenteditable="true"][data-tab="10"]');
+            if (composer && document.activeElement !== composer) {
                 composer.focus();
             }
         }, 50);
@@ -1803,21 +2002,27 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
     // Disparador temporal: habilita momentaneamente el marcado de los mensajes acumulados,
     // emite los eventos y se desactiva tras 1400 ms para que los mensajes que lleguen despues
     // sigan sin leerse (doble check gris) hasta que el usuario envie una nueva respuesta.
-    window.__waTriggerTemporarySeen = function() {
+    window.__waTriggerTemporarySeen = function(skipRowReselect) {
         if (seenResetTimer) {
             clearTimeout(seenResetTimer);
             seenResetTimer = null;
         }
+        clearReadOnlyCheckTimers();
 
         window.__waMarkingSeenActive = true;
-        window.__waHasRepliedInCurrentChat = true;
+        if (!skipRowReselect) {
+            window.__waHasRepliedInCurrentChat = true;
+        }
+
+        // Emitir foco en t=0 para handlers sincronos (p. ej. "Marcar como leido" desde menu)
+        dispatchFocusEvents();
 
         setTimeout(function() {
-            if (window.__waTriggerSeenCore) window.__waTriggerSeenCore();
+            if (window.__waTriggerSeenCore) window.__waTriggerSeenCore(!!skipRowReselect);
         }, 200);
 
         setTimeout(function() {
-            if (window.__waTriggerSeenCore) window.__waTriggerSeenCore();
+            if (window.__waTriggerSeenCore) window.__waTriggerSeenCore(!!skipRowReselect);
         }, 600);
 
         // Desactivar el estado de lectura tras una ventana de 1400 ms
@@ -1834,38 +2039,280 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
 
     window.__waTriggerSeen = window.__waTriggerTemporarySeen;
 
-    // Al cambiar de chat mediante clic del usuario en la barra lateral (#pane-side),
-    // se reinicia el estado de respuesta para que el nuevo chat quede en modo incognito
+    // Detecta si la conversacion abierta en #main es de Comunidad / avisos / solo lectura (sin compositor editable)
+    window.__waIsReadOnlyConversation = function(allowNoFooterFallback) {
+        var main = document.getElementById('main');
+        if (!main) return false;
+        var header = main.querySelector('header');
+        if (!header) return false;
+
+        var composer = main.querySelector(
+            'footer div[contenteditable="true"], ' +
+            'div[contenteditable="true"][data-tab="10"], ' +
+            'div[contenteditable="true"][role="textbox"], ' +
+            'div[contenteditable="true"]'
+        );
+        if (composer) return false;
+
+        var activePtt = main.querySelector('[data-icon="ptt-send"], [data-testid="ptt-send"], [data-testid="audio-send"]');
+        if (activePtt) return false;
+
+        var footer = main.querySelector('footer');
+        if (footer && (footer.children.length > 0 || (footer.innerText || footer.textContent || '').trim().length > 0)) {
+            return true;
+        }
+
+        var hasExplicitIndicator = main.querySelector(
+            '[data-testid*="announcement"], [data-testid*="read-only"], [data-testid*="only-admin"], ' +
+            'span[data-icon*="announcement"], span[data-icon*="megaphone"], span[data-icon*="community"]'
+        ) !== null;
+        if (hasExplicitIndicator) {
+            return true;
+        }
+
+        var mainText = (main.innerText || main.textContent || '');
+        if (/solo los administradores pueden enviar|only admins can send|only admins can post|apenas administradores podem enviar|no puedes enviar mensajes a este grupo|you can't send messages to this group|este grupo se cerr|this group has ended/i.test(mainText)) {
+            return true;
+        }
+
+        if (allowNoFooterFallback) {
+            var hasBody = main.querySelector('[role="application"], [role="region"], [data-testid="conversation-panel-messages"], div[tabindex="-1"]') !== null;
+            if (hasBody) {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    // Programa verificacion automatica a 250 ms y 650 ms tras abrir una conversacion
+    window.__waScheduleReadOnlyChatCheck = function() {
+        if (window.__waMarkingSeenActive) return;
+        clearReadOnlyCheckTimers();
+
+        readOnlyCheckTimer1 = setTimeout(function() {
+            readOnlyCheckTimer1 = null;
+            if (window.__waMarkingSeenActive || window.__waHasRepliedInCurrentChat) return;
+            if (window.__waIsReadOnlyConversation && window.__waIsReadOnlyConversation(false)) {
+                window.__waTriggerTemporarySeen();
+            }
+        }, 250);
+
+        readOnlyCheckTimer2 = setTimeout(function() {
+            readOnlyCheckTimer2 = null;
+            if (window.__waMarkingSeenActive || window.__waHasRepliedInCurrentChat) return;
+            if (window.__waIsReadOnlyConversation && window.__waIsReadOnlyConversation(true)) {
+                window.__waTriggerTemporarySeen();
+            }
+        }, 650);
+    };
+
+    // Detecta la accion manual "Marcar como leido" / "Mark as read", excluyendo "no leido" / "unread"
+    var isMarkAsReadMenuAction = function(target) {
+        if (!target || !target.closest) return false;
+        var item = target.closest(
+            '[role="menuitem"], [role="option"], [data-animate-dropdown-item="true"], ' +
+            'div[role="application"] li, div[role="application"] [role="button"], ' +
+            'div[role="menu"] li, div[role="menu"] [role="button"], ' +
+            'ul[role="menu"] li, ul[role="menu"] [role="button"], ' +
+            'li[role="button"], li[tabindex]'
+        );
+        if (!item) {
+            var fallback = target.closest('li, div[role="button"], button');
+            if (fallback && !fallback.closest('#pane-side [role="row"], #pane-side [role="listitem"], #main')) {
+                item = fallback;
+            }
+        }
+        if (!item) return false;
+
+        var iconEl = item.querySelector('[data-icon], [data-testid]');
+        var dataIcon = ((item.getAttribute('data-icon') || '') + ' ' + (iconEl ? (iconEl.getAttribute('data-icon') || '') : '')).toLowerCase();
+        var dataTestId = ((item.getAttribute('data-testid') || '') + ' ' + (iconEl ? (iconEl.getAttribute('data-testid') || '') : '')).toLowerCase();
+
+        if (dataIcon.indexOf('unread') !== -1 || dataTestId.indexOf('unread') !== -1) {
+            return false;
+        }
+        if (dataIcon.indexOf('mark-read') !== -1 || dataIcon.indexOf('mark_read') !== -1 ||
+            dataTestId.indexOf('mark-read') !== -1 || dataTestId.indexOf('mark_read') !== -1) {
+            return true;
+        }
+
+        var rawText = (item.innerText || item.textContent || item.getAttribute('aria-label') || '').trim();
+        if (!rawText || rawText.length > 60) return false;
+
+        var cleanText = (rawText.normalize ? rawText.normalize('NFD').replace(/[\u0300-\u036f]/g, '') : rawText)
+                        .replace(/[\u200E\u200F\u202A-\u202E\u2066-\u2069]/g, '')
+                        .replace(/\s+/g, ' ')
+                        .trim()
+                        .toLowerCase();
+
+        if (/\b(no\s+leid[oa]s?|unread|nao\s+lid[oa]s?|non\s+lu[es]?|non\s+lett[oi]|da\s+leggere|ungelesen|no\s+llegit[s]?)\b/.test(cleanText)) {
+            return false;
+        }
+
+        return /^(marcar\s+(como\s+|todo\s+como\s+)?leid[oa]s?|mark\s+(all\s+)?as\s+read|marcar\s+(tudo\s+)?como\s+lid[oa]s?|marquer\s+(tout\s+)?comme\s+lu[es]?|segna\s+(tutto\s+)?come\s+(gia\s+)?lett[oi]|als\s+gelesen\s+markieren|marca\s+(tot\s+)?com\s+a\s+llegit[s]?)$/.test(cleanText);
+    };
+
+    var triggerManualMarkAsRead = function(onlyEnableFocus) {
+        var skipRowReselect = false;
+        if (lastContextRow && (Date.now() - lastContextRowTime) < 15000) {
+            var isRowSelected = lastContextRow.getAttribute('aria-selected') === 'true' ||
+                                lastContextRow.querySelector('[aria-selected="true"]') !== null;
+            if (!isRowSelected) {
+                skipRowReselect = true;
+            }
+        }
+        if (onlyEnableFocus) {
+            if (seenResetTimer) {
+                clearTimeout(seenResetTimer);
+            }
+            window.__waMarkingSeenActive = true;
+            dispatchFocusEvents();
+            seenResetTimer = setTimeout(function() {
+                window.__waMarkingSeenActive = false;
+                window.__waHasRepliedInCurrentChat = false;
+                seenResetTimer = null;
+                try {
+                    window.dispatchEvent(new FocusEvent('blur'));
+                    window.dispatchEvent(new Event('blur'));
+                } catch (e) {}
+            }, 1400);
+        } else {
+            window.__waTriggerTemporarySeen(skipRowReselect);
+        }
+    };
+
+    var recordPaneContextRow = function(event) {
+        var target = event.target;
+        if (!target || !target.closest) return;
+        if (target.closest('#pane-side')) {
+            var row = target.closest('[role="row"], [role="listitem"], div[data-testid="cell-frame-container"]');
+            if (row) {
+                lastContextRow = row;
+                lastContextRowTime = Date.now();
+            }
+        }
+    };
+    document.addEventListener('contextmenu', recordPaneContextRow, true);
+    document.addEventListener('pointerdown', recordPaneContextRow, true);
+    document.addEventListener('mousedown', recordPaneContextRow, true);
+
+    var handleManualReadPointerDown = function(event) {
+        if (!event.isTrusted) return;
+        if (isMarkAsReadMenuAction(event.target)) {
+            triggerManualMarkAsRead(true);
+        }
+    };
+    window.addEventListener('pointerdown', handleManualReadPointerDown, true);
+    window.addEventListener('mousedown', handleManualReadPointerDown, true);
+
+    // Al cambiar de chat mediante clic en #pane-side o panel de comunidades, reiniciar incognito y revisar solo lectura
     document.addEventListener('click', function(event) {
         if (!event.isTrusted) return;
         var target = event.target;
-        if (target && target.closest('#pane-side')) {
-            window.__waCancelTemporarySeen();
+        if (!target) return;
+        if (isMarkAsReadMenuAction(target)) {
+            return;
         }
-    }, true);
-
-    // Deteccion de envio por teclado (tecla Enter en el campo de texto editable)
-    window.addEventListener('keydown', function(event) {
-        if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.isComposing) {
-            var composer = document.querySelector('footer div[contenteditable="true"]') ||
-                           document.querySelector('div[contenteditable="true"][data-tab="10"]') ||
-                           event.target;
-            if (composer) {
-                var text = (composer.innerText || composer.textContent || '').trim();
-                if (text.length > 0) {
-                    window.__waTriggerTemporarySeen();
-                }
+        if (target.closest('#pane-side')) {
+            window.__waCancelTemporarySeen();
+            if (window.__waScheduleReadOnlyChatCheck) {
+                window.__waScheduleReadOnlyChatCheck();
+            }
+        } else if (target.closest('#side [role="listitem"], #side [role="row"], [data-wa-side-column="true"] [role="listitem"], [data-wa-side-column="true"] [role="row"]')) {
+            if (window.__waScheduleReadOnlyChatCheck) {
+                window.__waScheduleReadOnlyChatCheck();
             }
         }
     }, true);
 
-    // Deteccion de envio por clic en el boton de enviar (o envio de audio/adjuntos)
+    // Deteccion de envio por teclado (Enter en compositor/modal o sobre "Marcar como leido" en menu)
+    window.addEventListener('keydown', function(event) {
+        if ((event.key === 'Enter' || event.key === ' ') && isMarkAsReadMenuAction(event.target || document.activeElement)) {
+            triggerManualMarkAsRead(false);
+            return;
+        }
+        if (event.key === 'Enter' && !event.shiftKey && !event.ctrlKey && !event.altKey && !event.metaKey && !event.isComposing) {
+            var target = event.target;
+            if (target && target.closest && target.closest('#side, #pane-side')) return;
+
+            var popups = document.querySelectorAll(
+                '#main [role="listbox"], [data-animate-modal-popup="true"] [role="listbox"], ' +
+                '[data-testid*="mention-suggestion"], [data-testid*="mention-list"], ' +
+                '[data-testid*="emoji-suggestion"], [data-testid*="autocomplete"], .wa-autocomplete'
+            );
+            for (var p = 0; p < popups.length; p++) {
+                if (popups[p].offsetWidth > 0 && popups[p].offsetHeight > 0) {
+                    return;
+                }
+            }
+
+            var hasMediaSendBtn = function() {
+                var icons = document.querySelectorAll(
+                    'span[data-icon="wds-ic-send-filled"], span[data-icon*="send"], [data-testid*="send"]'
+                );
+                for (var i = 0; i < icons.length; i++) {
+                    var ic = icons[i];
+                    var btn = ic.closest('button, [role="button"]');
+                    if (btn && !ic.closest('#main footer') && !ic.closest('#side') && (ic.offsetWidth > 0 || ic.offsetHeight > 0)) {
+                        return true;
+                    }
+                }
+                return false;
+            };
+
+            var editable = (target && target.closest) ? target.closest('[contenteditable="true"]') : null;
+            if (!editable) {
+                editable = document.querySelector('#main footer div[contenteditable="true"]') ||
+                           document.querySelector('div[contenteditable="true"][data-tab="10"]');
+            }
+            var beforeText = editable ? (editable.innerText || editable.textContent || '').trim() : '';
+            var mediaSendWasOpen = hasMediaSendBtn();
+
+            if (beforeText.length > 0 || mediaSendWasOpen) {
+                setTimeout(function() {
+                    if (beforeText.length > 0 && editable && editable.isConnected) {
+                        var afterText = (editable.innerText || editable.textContent || '').trim();
+                        if (afterText.length === 0 || (mediaSendWasOpen && !hasMediaSendBtn())) {
+                            window.__waTriggerTemporarySeen();
+                        }
+                    } else if (mediaSendWasOpen || (editable && !editable.isConnected)) {
+                        window.__waTriggerTemporarySeen();
+                    }
+                }, 40);
+            }
+        }
+    }, true);
+
+    // Deteccion de envio por clic en el boton de enviar (audio/adjuntos/stickers/encuestas en cualquier idioma) o accion manual
     window.addEventListener('click', function(event) {
         if (!event.isTrusted) return;
         var target = event.target;
-        if (!target) return;
-        var sendBtn = target.closest('button span[data-icon="send"], button span[data-testid="send"], button[aria-label="Send"], button[aria-label="Enviar"], button[data-tab="11"], button[data-testid="compose-btn-send"], div[role="button"][aria-label="Send"], div[role="button"][aria-label="Enviar"]');
-        if (sendBtn || target.getAttribute('data-icon') === 'send' || target.getAttribute('data-testid') === 'send') {
+        if (!target || !target.closest) return;
+        if (isMarkAsReadMenuAction(target)) {
+            triggerManualMarkAsRead(false);
+            return;
+        }
+        if (target.closest('#side, #pane-side')) return;
+        var sendBtn = target.closest(
+            'span[data-icon="wds-ic-send-filled"], span[data-icon*="send"], [data-icon*="send"], [data-testid*="send"], ' +
+            'button[aria-label="Send"], button[aria-label="Enviar"], button[data-tab="11"], button[data-testid="compose-btn-send"], ' +
+            'div[role="button"][aria-label="Send"], div[role="button"][aria-label="Enviar"], [role="button"][data-tab="11"], ' +
+            '[data-icon="ptt-send"], [data-testid="ptt-send"], [data-testid="audio-send"], ' +
+            '[data-testid="sticker"], [data-animate-picker="true"] [role="gridcell"], [data-testid="btn-create-poll"]'
+        );
+        if (!sendBtn) {
+            var btnContainer = target.closest('button, [role="button"]');
+            if (btnContainer) {
+                sendBtn = btnContainer.querySelector(
+                    'span[data-icon="wds-ic-send-filled"], span[data-icon*="send"], [data-icon*="send"], ' +
+                    '[data-testid*="send"], [data-icon="ptt-send"], [data-testid="ptt-send"], [data-testid="audio-send"]'
+                );
+            }
+        }
+        var attrIcon = target.getAttribute('data-icon') || '';
+        var attrTestId = target.getAttribute('data-testid') || '';
+        if (sendBtn || attrIcon.indexOf('send') !== -1 || attrTestId.indexOf('send') !== -1) {
             window.__waTriggerTemporarySeen();
         }
     }, true);
@@ -2065,9 +2512,8 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 box-sizing: border-box !important;
             }
 
-            /* 3. Neutralizacion de paneles auxiliares cerrados */
-            .two > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty,
-            .three > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty {
+            /* 3. Neutralizacion de paneles auxiliares cerrados (solo en modo .two) */
+            .two > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty {
                 width: 0 !important;
                 min-width: 0 !important;
                 max-width: 0 !important;
@@ -2165,23 +2611,22 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 z-index: 99999 !important;
             }
 
-            /* Linea vertical residual: capas hermanas (drawers/overlays) del contenedor flex
-               conservan el ancho/borde original de WhatsApp (~30%). Se sincronizan con la barra
-               y se eliminan sus bordes en ambos modos. */
-            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not(:has([role="alert"], [role="status"], [data-testid*="toast"])) {
+            /* Linea vertical residual: capas hermanas (drawers/overlays cerrados) del contenedor flex;
+               se excluye .three para permitir la apertura del panel de informacion/multimedia. */
+            [data-wa-flex-container="true"]:not(.three) > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not(:has(header)):not(:has([role="alert"], [role="status"], [data-testid*="toast"])) {
                 border-right: none !important;
                 border-left: none !important;
                 box-shadow: none !important;
                 max-width: var(--wa-sidebar-width, 30%) !important;
             }
-            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"])::before,
-            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"])::after,
+            [data-wa-flex-container="true"]:not(.three) > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"])::before,
+            [data-wa-flex-container="true"]:not(.three) > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"])::after,
             [data-wa-flex-container="true"]::before,
             [data-wa-flex-container="true"]::after {
                 border: none !important;
                 box-shadow: none !important;
             }
-            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):empty {
+            [data-wa-flex-container="true"]:not(.three) > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):empty {
                 display: none !important;
             }
 
@@ -2331,16 +2776,22 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 position: relative !important;
             }
 
-            /* Ocultacion universal de texto, fecha, preview, badges y chinchetas */
-            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :not(:first-child),
-            body.wa-sidebar-compact #pane-side [role="row"] > :not(:first-child),
-            body.wa-sidebar-compact #pane-side [role="listitem"] > :not(:first-child),
-            body.wa-sidebar-compact #pane-side [role="gridcell"] > :not(:first-child),
-            body.wa-sidebar-compact #pane-side [role="row"] > div > :not(:first-child),
-            body.wa-sidebar-compact #pane-side [role="listitem"] > div > :not(:first-child),
-            body.wa-sidebar-compact #pane-side [role="gridcell"] > div > :not(:first-child),
-            body.wa-sidebar-compact #pane-side [role="row"] > div > div > :not(:first-child),
-            body.wa-sidebar-compact #pane-side [role="listitem"] > div > div > :not(:first-child),
+            /* Ocultacion universal de texto, fecha, preview, badges nativos y chinchetas (preservando .wa-alt-badge) */
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="row"] > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="gridcell"] > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="row"] > div > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="gridcell"] > div > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="row"] > div > div > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > div > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="row"] > div > div > div > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > div > div > :not(:first-child):not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="row"] div:has(> img) ~ *:not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> img) ~ *:not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="row"] div[role="button"] ~ *:not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side [role="listitem"] div[role="button"] ~ *:not(.wa-alt-badge),
             body.wa-sidebar-compact #pane-side [data-testid="cell-frame-title"],
             body.wa-sidebar-compact #pane-side [data-testid="cell-frame-primary"],
             body.wa-sidebar-compact #pane-side [data-testid="cell-frame-secondary"],
@@ -2363,6 +2814,14 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 flex: 0 0 0px !important;
                 opacity: 0 !important;
                 pointer-events: none !important;
+            }
+
+            body.wa-sidebar-compact #pane-side .wa-alt-badge {
+                display: flex !important;
+                visibility: visible !important;
+                opacity: 1 !important;
+                width: 20px !important;
+                height: 20px !important;
             }
 
             /* Columna del avatar: Dimension fija estricta de 49px x 49px centrada */
@@ -2395,6 +2854,15 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             /* Envoltorios internos del avatar: neutralizacion de paddings nativos */
             body.wa-sidebar-compact #pane-side [role="row"] div:has(> img),
             body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> img),
+            body.wa-sidebar-compact #pane-side [role="row"] div:has(> span[data-icon]),
+            body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> span[data-icon]),
+            body.wa-sidebar-compact #pane-side [role="row"] span[data-icon="default-user"],
+            body.wa-sidebar-compact #pane-side [role="row"] span[data-icon="default-group"],
+            body.wa-sidebar-compact #pane-side [role="row"] span[data-icon="community-outline"],
+            body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) span[data-icon*="avatar-"],
+            body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) span[data-icon*="default-"],
+            body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) span[data-icon*="channel"],
+            body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) span[data-icon*="newsletter"],
             body.wa-sidebar-compact #pane-side [role="row"] div[role="button"],
             body.wa-sidebar-compact #pane-side [role="listitem"] div[role="button"],
             body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] div[role="button"],
@@ -2469,7 +2937,11 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
 
             /* Fallback para avatares vectoriales por defecto */
             body.wa-sidebar-compact #pane-side span[data-icon="default-user"] svg,
-            body.wa-sidebar-compact #pane-side span[data-icon="default-group"] svg {
+            body.wa-sidebar-compact #pane-side span[data-icon="default-group"] svg,
+            body.wa-sidebar-compact #pane-side span[data-icon*="avatar-"] svg,
+            body.wa-sidebar-compact #pane-side span[data-icon*="default-"] svg,
+            body.wa-sidebar-compact #pane-side span[data-icon*="channel"] svg,
+            body.wa-sidebar-compact #pane-side span[data-icon*="newsletter"] svg {
                 position: static !important;
                 transform: none !important;
                 width: 49px !important;
@@ -2477,7 +2949,8 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 border-radius: 50% !important;
             }
 
-            body.wa-sidebar-compact #pane-side span[data-icon="community-outline"] svg {
+            body.wa-sidebar-compact #pane-side span[data-icon="community-outline"] svg,
+            body.wa-sidebar-compact #pane-side span[data-icon*="community"] svg {
                 position: static !important;
                 transform: none !important;
                 width: 49px !important;
@@ -2489,12 +2962,19 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             body.wa-sidebar-compact #pane-side [role="listitem"][aria-selected="true"],
             body.wa-sidebar-compact #pane-side [role="row"]:has([aria-selected="true"]),
             body.wa-sidebar-compact #pane-side [role="listitem"]:has([aria-selected="true"]) {
-                border-left: 3px solid #00a884 !important;
+                border-left: none !important;
+                box-shadow: inset 3px 0 0 0 #00a884 !important;
                 background: rgba(134, 150, 160, 0.15) !important;
             }
 
             body.wa-sidebar-compact #side header {
-                padding: 10px 0 !important;
+                padding: 4px 0 !important;
+                height: 42px !important;
+                min-height: 42px !important;
+                max-height: 42px !important;
+                background: transparent !important;
+                border: none !important;
+                box-shadow: none !important;
                 display: flex !important;
                 justify-content: center !important;
                 align-items: center !important;
@@ -2668,6 +3148,34 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         };
     }
 
+    function syncAuxDrawers(container, sideCol, mainCol) {
+        if (!container) return;
+        var side = document.querySelector('#side');
+        var mainEl = document.querySelector('#main');
+        var children = container.children;
+        for (var i = 0; i < children.length; i++) {
+            var child = children[i];
+            if (child === sideCol || child === mainCol ||
+                (side && child.contains(side)) || (mainEl && child.contains(mainEl))) {
+                continue;
+            }
+            var isOpen = container.classList.contains('three') ||
+                         child.querySelector('header, section, [role="region"]') !== null ||
+                         child.children.length > 0;
+            if (!isOpen) {
+                child.style.setProperty('flex', '0 0 0px', 'important');
+                child.style.setProperty('flex-grow', '0', 'important');
+                child.style.setProperty('width', '0px', 'important');
+                child.style.setProperty('max-width', '0px', 'important');
+            } else {
+                child.style.removeProperty('flex');
+                child.style.removeProperty('flex-grow');
+                child.style.removeProperty('width');
+                child.style.removeProperty('max-width');
+            }
+        }
+    }
+
     function setSidebarWidth(width, persist) {
         var max = getMaxWidth();
         var clamped = Math.max(MIN_WIDTH, Math.min(width, max));
@@ -2720,22 +3228,8 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 mainEl.style.setProperty('flex', '1 1 auto', 'important');
             }
 
-            // Neutralizar cualquier cajon lateral auxiliar derecho que este cerrado
-            var container = containers.flexContainer;
-            if (container) {
-                var children = container.children;
-                for (var i = 0; i < children.length; i++) {
-                    var child = children[i];
-                    if (child !== sideCol && child !== mainCol && !child.contains(side) && (!mainEl || !child.contains(mainEl))) {
-                        if (child.children.length === 0 || child.offsetWidth === 0) {
-                            child.style.setProperty('flex', '0 0 0px', 'important');
-                            child.style.setProperty('flex-grow', '0', 'important');
-                            child.style.setProperty('width', '0px', 'important');
-                            child.style.setProperty('max-width', '0px', 'important');
-                        }
-                    }
-                }
-            }
+            // Neutralizar solo cajones auxiliares cerrados sin bloquear el panel de info abierto (.three)
+            syncAuxDrawers(containers.flexContainer, sideCol, mainCol);
         }
 
         if (persist) {
@@ -2854,7 +3348,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 sideCol.style.setProperty('min-width', '70px', 'important');
                 sideCol.style.setProperty('max-width', '70px', 'important');
                 sideCol.style.setProperty('flex-basis', '70px', 'important');
-                sideCol.style.setProperty('overflow', 'hidden', 'important');
+                sideCol.style.setProperty('overflow', 'visible', 'important');
                 sideCol.style.setProperty('border-right', 'none', 'important');
             }
             if (side && side !== sideCol) {
@@ -2862,7 +3356,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 side.style.setProperty('min-width', '70px', 'important');
                 side.style.setProperty('max-width', '70px', 'important');
                 side.style.setProperty('flex-basis', '70px', 'important');
-                side.style.setProperty('overflow', 'hidden', 'important');
+                side.style.setProperty('overflow', 'visible', 'important');
                 side.style.setProperty('border-right', 'none', 'important');
             }
             if (resizerElement) {
@@ -2876,20 +3370,8 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 mainCol.style.setProperty('width', 'auto', 'important');
                 mainCol.style.setProperty('max-width', 'none', 'important');
             }
-            var container = (containers && containers.flexContainer) ? containers.flexContainer : null;
-            if (container) {
-                var children = container.children;
-                for (var i = 0; i < children.length; i++) {
-                    var child = children[i];
-                    if (child !== sideCol && child !== mainCol && !child.contains(side) && (!document.querySelector('#main') || !child.contains(document.querySelector('#main')))) {
-                        if (child.children.length === 0 || child.offsetWidth === 0) {
-                            child.style.setProperty('flex', '0 0 0px', 'important');
-                            child.style.setProperty('flex-grow', '0', 'important');
-                            child.style.setProperty('width', '0px', 'important');
-                            child.style.setProperty('max-width', '0px', 'important');
-                        }
-                    }
-                }
+            if (containers && containers.flexContainer) {
+                syncAuxDrawers(containers.flexContainer, sideCol, mainCol);
             }
         } else {
             document.body.classList.remove('wa-sidebar-compact');
@@ -2937,18 +3419,8 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
 
         wrapper.appendChild(btn);
 
-        var buttons = header.querySelectorAll('div[role="button"], button');
-        var targetContainer = null;
-        if (buttons.length > 0) {
-            var lastBtn = buttons[buttons.length - 1];
-            targetContainer = lastBtn.closest('div');
-        }
-
-        if (targetContainer && targetContainer !== header) {
-            targetContainer.insertBefore(wrapper, targetContainer.firstChild);
-        } else {
-            header.appendChild(wrapper);
-        }
+        // Insertar siempre como hijo directo de header para no quedar oculto dentro de botones nativos
+        header.appendChild(wrapper);
 
         return true;
     }
@@ -3017,12 +3489,22 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         var c = resolveLayoutContainers();
         if (!c) return;
         [c.sideColumn, c.side].forEach(function(el) {
-            if (!el || el.__waCompactApplied) return;
-            el.__waCompactApplied = true;
+            if (!el) return;
             el.style.setProperty('width', '70px', 'important');
             el.style.setProperty('flex-basis', '70px', 'important');
+            el.style.setProperty('overflow', 'visible', 'important');
             el.style.setProperty('border-right', 'none', 'important');
         });
+        if (c.mainColumn) {
+            c.mainColumn.style.setProperty('flex', '1 1 0%', 'important');
+            c.mainColumn.style.setProperty('min-width', '0', 'important');
+        }
+        if (c.flexContainer) {
+            syncAuxDrawers(c.flexContainer, c.sideColumn, c.mainColumn);
+        }
+        if (c.side && c.sideColumn && c.mainColumn) {
+            c.side.__waCompactApplied = true;
+        }
     }
 
     var savedCompact = localStorage.getItem(STORAGE_KEY_COMPACT);
@@ -3042,12 +3524,19 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
     var observer = new MutationObserver(function() {
         ensureToggleButton();
         syncAvatarTooltips();
+        if (window.__waEnsurePaneListeners) {
+            window.__waEnsurePaneListeners();
+        }
+        var c = resolveLayoutContainers();
+        if (c && c.flexContainer) {
+            syncAuxDrawers(c.flexContainer, c.sideColumn, c.mainColumn);
+        }
         if (!isCompactActive()) {
             initResizer();
         } else if (document.querySelector('#side') &&
                    (!document.querySelector('[data-wa-side-column="true"]') ||
                     !document.querySelector('#side').__waCompactApplied)) {
-            // #side monto despues del arranque en modo compacto: reaplicar contenedores y anchos
+            // #side o #main monto despues del arranque en modo compacto: reaplicar contenedores y anchos
             applyCompactInline();
         }
     });

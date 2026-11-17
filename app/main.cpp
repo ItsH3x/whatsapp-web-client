@@ -95,10 +95,9 @@ int main(int argc, char *argv[])
 
     QObject::connect(&server, &QLocalServer::newConnection, [&server, &client]() {
         while (QLocalSocket *clientSocket = server.nextPendingConnection()) {
-            if (clientSocket->waitForReadyRead(1000)) {
-                const QByteArray rawData = clientSocket->readAll();
-                const QString data = QString::fromUtf8(rawData);
-                if (data.startsWith("SHOW:")) {
+            QObject::connect(clientSocket, &QLocalSocket::readyRead, &client, [clientSocket, &client]() {
+                const QString data = QString::fromUtf8(clientSocket->readAll());
+                if (data.startsWith(QLatin1String("SHOW:"))) {
                     client.show();
                     client.activateWindow();
                     client.raise();
@@ -107,9 +106,10 @@ int main(int argc, char *argv[])
                         client.handleWhatsAppUrl(url);
                     }
                 }
-            }
-            clientSocket->disconnectFromServer();
-            clientSocket->deleteLater();
+                clientSocket->disconnectFromServer();
+                clientSocket->deleteLater();
+            });
+            QObject::connect(clientSocket, &QLocalSocket::disconnected, clientSocket, &QObject::deleteLater);
         }
     });
 
