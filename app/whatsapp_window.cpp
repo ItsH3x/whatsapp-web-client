@@ -2642,6 +2642,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
     var DEFAULT_RIGHT_WIDTH = 340;
 
     var isDragging = false;
+    var currentSidebarWidth = getSavedWidth();
     var resizerElement = null;
     var rafPending = false;
     var targetClientX = 0;
@@ -2897,7 +2898,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 width: var(--wa-resizer-hitbox-width) !important;
                 margin-left: calc(var(--wa-resizer-hitbox-width) / -2) !important;
                 cursor: col-resize !important;
-                z-index: 4 !important;
+                z-index: 1000 !important;
                 background-color: transparent !important;
                 user-select: none !important;
                 -webkit-user-select: none !important;
@@ -2907,7 +2908,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
 
             #wa-custom-resizer.is-resizing,
             #wa-custom-right-resizer.is-resizing {
-                z-index: 9999 !important;
+                z-index: 99999 !important;
             }
 
             #wa-custom-resizer::after,
@@ -2936,6 +2937,18 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 user-select: none !important;
                 -webkit-user-select: none !important;
                 transition: none !important;
+            }
+
+            [data-animate-picker="true"],
+            [data-animate-modal-popup="true"],
+            [data-animate-dropdown-item="true"],
+            [role="dialog"],
+            [role="menu"],
+            [role="alert"],
+            [role="status"],
+            [data-testid*="toast"],
+            [data-animate-toast] {
+                z-index: 2000 !important;
             }
 
             /* 5. Reglas del Modo Compacto (limitadas al subarbol de #side para no aplastar
@@ -3076,12 +3089,12 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 margin: 0 !important;
             }
 
-            body.wa-sidebar-compact #side > div:not(#pane-side):not(header):not(:has(#pane-side)):not(:has(header)),
-            body.wa-sidebar-compact #side div:has(> #pane-side) > div:not(#pane-side):not(header):not(:has(header)):not(:has([role="alert"], [role="status"], [data-testid*="toast"])),
+            body.wa-sidebar-compact #side > div:not(#pane-side):not(:has(#pane-side)):not([role="alert"]):not([role="status"]):not([data-testid*="toast"]):not([data-animate-toast]):not(:has([role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast])),
+            body.wa-sidebar-compact #side div:has(> #pane-side) > div:not(#pane-side):not(:has(#pane-side)):not([role="alert"]):not([role="status"]):not([data-testid*="toast"]):not([data-animate-toast]):not(:has([role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast])),
             body.wa-sidebar-compact #side [role="search"]:not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
-            body.wa-sidebar-compact #side div:has(input):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
-            body.wa-sidebar-compact #side div:has([data-tab="3"]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
-            body.wa-sidebar-compact #side div:has(span[data-icon="search"]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has(input):not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has([data-tab="3"]):not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has(span[data-icon="search"]):not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
             body.wa-sidebar-compact #side [data-testid="chat-list-search"]:not(#pane-side):not(:has(#pane-side)):not(#pane-side *) {
                 display: none !important;
                 height: 0 !important;
@@ -3095,10 +3108,10 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             }
 
             body.wa-sidebar-compact #side [role="tablist"]:not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
-            body.wa-sidebar-compact #side div:has(> [role="tablist"]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
-            body.wa-sidebar-compact #side div:has(button[role="button"][value]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has(> [role="tablist"]):not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has(button[role="button"][value]):not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
             body.wa-sidebar-compact #side button:has(span[data-icon="filter"]):not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
-            body.wa-sidebar-compact #side div:has(span[data-icon="filter"]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *) {
+            body.wa-sidebar-compact #side div:has(span[data-icon="filter"]):not(#pane-side):not(:has(#pane-side)):not(#pane-side *) {
                 display: none !important;
                 height: 0 !important;
                 min-height: 0 !important;
@@ -3133,14 +3146,34 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 visibility: hidden !important;
             }
 
-            body.wa-sidebar-compact #side div:has(> #pane-side),
+            body.wa-sidebar-compact [data-wa-side-column="true"],
+            body.wa-sidebar-compact #side {
+                height: 100% !important;
+                max-height: 100vh !important;
+                margin-top: 0 !important;
+                padding-top: 0 !important;
+            }
+
+            body.wa-sidebar-compact [data-wa-side-column="true"] #side:has(#pane-side),
+            body.wa-sidebar-compact [data-wa-side-column="true"] div:has(#pane-side),
+            body.wa-sidebar-compact #side div:has(#pane-side),
             body.wa-sidebar-compact #pane-side {
                 width: 70px !important;
                 min-width: 70px !important;
                 max-width: 70px !important;
-                overflow-x: hidden !important;
+                height: 100% !important;
+                min-height: 0 !important;
+                max-height: 100vh !important;
+                flex: 1 1 auto !important;
+                margin-top: 0 !important;
+                padding-top: 0 !important;
                 box-sizing: border-box !important;
                 scrollbar-width: none !important;
+            }
+
+            body.wa-sidebar-compact #side div:has(#pane-side),
+            body.wa-sidebar-compact #pane-side {
+                overflow-x: hidden !important;
             }
 
             body.wa-sidebar-compact #pane-side::-webkit-scrollbar {
@@ -3150,11 +3183,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
 
             /* Filas y celdas del listado de chats en modo compacto */
             body.wa-sidebar-compact #pane-side [role="row"]:not([data-wa-compact-hide="true"]),
-            body.wa-sidebar-compact #pane-side [role="listitem"]:not([data-wa-compact-hide="true"]),
-            body.wa-sidebar-compact #pane-side [role="row"]:not([data-wa-compact-hide="true"]) > div:not([role="gridcell"]):not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
-            body.wa-sidebar-compact #pane-side [role="listitem"]:not([data-wa-compact-hide="true"]) > div:not([role="gridcell"]):not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
-            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:not([data-wa-compact-hide="true"]),
-            body.wa-sidebar-compact #pane-side div:has(> [data-wa-avatar-col="true"]) {
+            body.wa-sidebar-compact #pane-side [role="listitem"]:not([data-wa-compact-hide="true"]) {
                 width: 70px !important;
                 max-width: 70px !important;
                 min-width: 70px !important;
@@ -3164,7 +3193,24 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 justify-content: center !important;
                 align-items: center !important;
                 box-sizing: border-box !important;
-                overflow: hidden !important;
+                overflow: visible !important;
+            }
+
+            body.wa-sidebar-compact #pane-side [role="row"]:not([data-wa-compact-hide="true"]) > div:not([role="gridcell"]):not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
+            body.wa-sidebar-compact #pane-side [role="listitem"]:not([data-wa-compact-hide="true"]) > div:not([role="gridcell"]):not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:not([role="row"]):not([role="listitem"]):not([data-wa-compact-hide="true"]),
+            body.wa-sidebar-compact #pane-side div:has(> [data-wa-avatar-col="true"]):not([role="row"]):not([role="listitem"]) {
+                width: 70px !important;
+                max-width: 70px !important;
+                min-width: 70px !important;
+                height: 100% !important;
+                padding: 0 !important;
+                margin: 0 !important;
+                display: flex !important;
+                justify-content: center !important;
+                align-items: center !important;
+                box-sizing: border-box !important;
+                overflow: visible !important;
                 position: relative !important;
             }
 
@@ -3368,24 +3414,6 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 background: rgba(134, 150, 160, 0.15) !important;
             }
 
-            body.wa-sidebar-compact #side header {
-                padding: 4px 0 !important;
-                height: 42px !important;
-                min-height: 42px !important;
-                max-height: 42px !important;
-                background: transparent !important;
-                border: none !important;
-                box-shadow: none !important;
-                display: flex !important;
-                justify-content: center !important;
-                align-items: center !important;
-                box-sizing: border-box !important;
-            }
-
-            body.wa-sidebar-compact #side header > :not(.wa-compact-toggle-wrapper) {
-                display: none !important;
-            }
-
             .wa-compact-toggle-wrapper {
                 display: inline-flex !important;
                 align-items: center !important;
@@ -3395,9 +3423,27 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 vertical-align: middle !important;
             }
 
-            body.wa-sidebar-compact .wa-compact-toggle-wrapper {
-                margin: 0 auto !important;
-                width: 100% !important;
+            body.wa-sidebar-compact #side header,
+            body.wa-sidebar-compact [data-wa-side-column="true"] header,
+            body.wa-sidebar-compact .wa-compact-toggle-wrapper,
+            body.wa-sidebar-compact #side > :not(#pane-side):not(:has(#pane-side)):not([role="alert"]):not([role="status"]):not([data-testid*="toast"]):not([data-animate-toast]):not(:has([role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast])),
+            body.wa-sidebar-compact [data-wa-side-column="true"] > :not(#side):not(#pane-side):not(:has(#side)):not(:has(#pane-side)):not([role="alert"]):not([role="status"]):not([data-testid*="toast"]):not([data-animate-toast]):not(:has([role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast])),
+            body.wa-sidebar-compact [data-wa-side-column="true"] [data-wa-compact-hide="true"],
+            body.wa-sidebar-compact #side [data-wa-compact-hide="true"] {
+                display: none !important;
+                width: 0 !important;
+                min-width: 0 !important;
+                max-width: 0 !important;
+                height: 0 !important;
+                min-height: 0 !important;
+                max-height: 0 !important;
+                margin: 0 !important;
+                padding: 0 !important;
+                border: none !important;
+                overflow: hidden !important;
+                visibility: hidden !important;
+                opacity: 0 !important;
+                pointer-events: none !important;
             }
 
             .wa-compact-toggle-btn {
@@ -3622,9 +3668,17 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         var side = document.querySelector('#side');
         var mainEl = document.querySelector('#main');
         var sideRect = sideCol ? sideCol.getBoundingClientRect() : null;
-        var targetSideW = isCompactActive() ? getSavedWidth() : Math.round((sideRect && sideRect.width) || getSavedWidth());
+        var targetSideW = isCompactActive() ? getSavedWidth() : (currentSidebarWidth || Math.round((sideRect && sideRect.width) || getSavedWidth()));
         var hasRightCol = false;
         var children = container.children;
+
+        function clearStaleInnerDrawers(el) {
+            var stale = el.querySelectorAll('[data-wa-left-drawer="true"]');
+            for (var k = 0; k < stale.length; k++) {
+                stale[k].removeAttribute('data-wa-left-drawer');
+                clearAuxInlineStyles(stale[k]);
+            }
+        }
 
         for (var i = 0; i < children.length; i++) {
             var child = children[i];
@@ -3643,6 +3697,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 child.removeAttribute('data-wa-left-drawer');
                 child.removeAttribute('data-wa-right-column');
                 child.removeAttribute('data-wa-aux-empty');
+                clearStaleInnerDrawers(child);
                 continue;
             }
 
@@ -3663,6 +3718,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             if (!hasRealContent) {
                 child.removeAttribute('data-wa-left-drawer');
                 child.removeAttribute('data-wa-right-column');
+                clearStaleInnerDrawers(child);
                 child.setAttribute('data-wa-aux-empty', 'true');
                 child.style.removeProperty('background-color');
                 child.style.removeProperty('border-left');
@@ -3695,6 +3751,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                     }
                     child.removeAttribute('data-wa-left-drawer');
                     child.removeAttribute('data-wa-right-column');
+                    clearStaleInnerDrawers(child);
                     continue;
                 }
 
@@ -3720,7 +3777,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                     child.style.setProperty('overflow', 'visible', 'important');
                     var absRect = absOverlay.getBoundingClientRect();
                     var absW = targetSideW;
-                    if (sideRect && absRect.width > 0 && absRect.left < sideRect.left) {
+                    if (sideRect && sideRect.width > 0 && absRect.width > 0 && absRect.left < sideRect.left) {
                         absW = Math.max(targetSideW, Math.round((sideRect.left + targetSideW) - absRect.left));
                     }
                     absOverlay.style.setProperty('width', absW + 'px', 'important');
@@ -3729,6 +3786,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                     absOverlay.style.setProperty('overflow', 'hidden', 'important');
                     absOverlay.style.setProperty('border-right', '1px solid rgba(134, 150, 160, 0.22)', 'important');
                     absOverlay.style.setProperty('background-color', 'var(--panel-background-deep, var(--background-default, #111b21))', 'important');
+                    absOverlay.setAttribute('data-wa-left-drawer', 'true');
                     continue;
                 }
 
@@ -3736,7 +3794,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 child.setAttribute('data-wa-left-drawer', 'true');
 
                 var drawerW = targetSideW;
-                if (sideRect && childRect.width > 0 && childRect.left < sideRect.left) {
+                if (sideRect && sideRect.width > 0 && childRect.width > 0 && childRect.left < sideRect.left) {
                     var sideRight = sideRect.left + targetSideW;
                     drawerW = Math.max(targetSideW, Math.round(sideRight - childRect.left));
                 }
@@ -3760,6 +3818,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 }
                 hasRightCol = true;
                 child.removeAttribute('data-wa-left-drawer');
+                clearStaleInnerDrawers(child);
                 child.setAttribute('data-wa-right-column', 'true');
 
                 if (!isRightDragging) {
@@ -3778,6 +3837,10 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         for (var j = 0; j < leftDrawers.length; j++) {
             var dl = leftDrawers[j];
             if (dl.children.length === 0) continue;
+            if (dl.hasAttribute('data-wa-left-drawer')) {
+                dl.style.setProperty('box-sizing', 'border-box', 'important');
+                continue;
+            }
             var inLeftDrawer = !!dl.closest('[data-wa-left-drawer="true"]');
             var inSideCol = !!(sideCol && sideCol.contains(dl));
             if (inLeftDrawer || (inSideCol && !isCompactActive())) {
@@ -3811,6 +3874,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         var max = getMaxWidth();
         var numericWidth = (typeof width === 'number' && !isNaN(width)) ? width : DEFAULT_WIDTH;
         var clamped = Math.max(MIN_WIDTH, Math.min(Math.round(numericWidth), max));
+        currentSidebarWidth = clamped;
 
         document.documentElement.style.setProperty('--wa-sidebar-width', clamped + 'px');
 
@@ -3819,6 +3883,10 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             var side = containers.side;
             var sideCol = containers.sideColumn;
             var mainCol = containers.mainColumn;
+
+            if (side) {
+                side.__waWidthApplied = true;
+            }
 
             if (sideCol) {
                 sideCol.style.removeProperty('border-right');
@@ -3876,6 +3944,23 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         updateResizerPosition();
     }
 
+    function resolveLeftResizeTarget() {
+        var containers = resolveLayoutContainers();
+        var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
+        var rect = targetEl ? targetEl.getBoundingClientRect() : null;
+        if (!targetEl || !rect || rect.width === 0 || rect.height === 0) {
+            var drawers = document.querySelectorAll('[data-wa-left-drawer="true"]');
+            for (var i = 0; i < drawers.length; i++) {
+                var dRect = drawers[i].getBoundingClientRect();
+                if (dRect.width > 0 && dRect.height > 0) {
+                    return { element: drawers[i], rect: dRect };
+                }
+            }
+            return null;
+        }
+        return { element: targetEl, rect: rect };
+    }
+
     function updateLeftResizerPosition() {
         if (!resizerElement) return;
 
@@ -3885,25 +3970,17 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             return;
         }
 
-        var containers = resolveLayoutContainers();
-        var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
-        if (!targetEl) {
-            resizerElement.style.display = 'none';
-            resizerElement.style.left = '-9999px';
-            return;
-        }
-
-        var rect = targetEl.getBoundingClientRect();
-        if (rect.width === 0 || rect.height === 0) {
+        var target = resolveLeftResizeTarget();
+        if (!target) {
             resizerElement.style.display = 'none';
             resizerElement.style.left = '-9999px';
             return;
         }
 
         resizerElement.style.display = 'block';
-        resizerElement.style.top = rect.top + 'px';
-        resizerElement.style.height = rect.height + 'px';
-        resizerElement.style.left = rect.right + 'px';
+        resizerElement.style.top = target.rect.top + 'px';
+        resizerElement.style.height = target.rect.height + 'px';
+        resizerElement.style.left = target.rect.right + 'px';
     }
 
     function updateRightResizerPosition() {
@@ -3959,11 +4036,10 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 rafPending = false;
                 if (!isDragging) return;
 
-                var containers = resolveLayoutContainers();
-                var sideCol = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
-                if (!sideCol) return;
+                var target = resolveLeftResizeTarget();
+                if (!target) return;
 
-                var sideLeft = sideCol.getBoundingClientRect().left;
+                var sideLeft = target.rect.left;
                 var calculatedWidth = targetClientX - sideLeft;
 
                 setSidebarWidth(calculatedWidth, false);
@@ -3982,10 +4058,9 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
 
         window.removeEventListener('mousemove', onMouseMove, { capture: true });
 
-        var containers = resolveLayoutContainers();
-        var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
-        if (targetEl) {
-            var currentWidth = Math.round(targetEl.getBoundingClientRect().width);
+        var target = resolveLeftResizeTarget();
+        if (target) {
+            var currentWidth = Math.round(target.rect.width);
             setSidebarWidth(currentWidth, true);
         }
     }
@@ -4162,6 +4237,50 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
 
         var pane = document.getElementById('pane-side');
         if (!pane) return;
+
+        var sideRoot = pane.closest('[data-wa-side-column="true"]') || document.getElementById('side');
+        if (sideRoot) {
+            var sideHeaders = sideRoot.querySelectorAll('header');
+            for (var h = 0; h < sideHeaders.length; h++) {
+                if (pane.contains(sideHeaders[h])) continue;
+                if (sideHeaders[h].getAttribute('data-wa-compact-hide') !== 'true') {
+                    sideHeaders[h].setAttribute('data-wa-compact-hide', 'true');
+                }
+            }
+
+            var ancCurr = pane;
+            while (ancCurr) {
+                if (ancCurr.hasAttribute('data-wa-compact-hide')) {
+                    ancCurr.removeAttribute('data-wa-compact-hide');
+                }
+                if (ancCurr === sideRoot) break;
+                var ancParent = ancCurr.parentElement;
+                if (!ancParent || !(sideRoot === ancParent || sideRoot.contains(ancParent))) {
+                    break;
+                }
+                var ancSibs = ancParent.children;
+                for (var as = 0; as < ancSibs.length; as++) {
+                    var ancSib = ancSibs[as];
+                    if (ancSib === ancCurr) continue;
+                    var isPaneBranch = ancSib.id === 'pane-side' || ancSib.contains(pane);
+                    var isSibToast = !isPaneBranch &&
+                                     !ancSib.matches('header') &&
+                                     !ancSib.querySelector('header, [role="search"], [role="tablist"], input') &&
+                                     (ancSib.matches('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') ||
+                                      ancSib.querySelector('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') !== null);
+                    if (isPaneBranch || isSibToast) {
+                        if (ancSib.hasAttribute('data-wa-compact-hide')) {
+                            ancSib.removeAttribute('data-wa-compact-hide');
+                        }
+                        continue;
+                    }
+                    if (ancSib.getAttribute('data-wa-compact-hide') !== 'true') {
+                        ancSib.setAttribute('data-wa-compact-hide', 'true');
+                    }
+                }
+                ancCurr = ancParent;
+            }
+        }
 
         if (!pane.__waCompactScrollAttached) {
             pane.__waCompactScrollAttached = true;
@@ -4491,6 +4610,11 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         }
         if (!isCompactActive()) {
             initResizer();
+            var sEl = document.querySelector('#side');
+            if (sEl && !sEl.__waWidthApplied) {
+                sEl.__waWidthApplied = true;
+                setSidebarWidth(currentSidebarWidth || getSavedWidth(), false);
+            }
         } else if (document.querySelector('#side') &&
                    (!document.querySelector('[data-wa-side-column="true"]') ||
                     !document.querySelector('#side').__waCompactApplied)) {
