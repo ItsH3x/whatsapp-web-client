@@ -15,10 +15,12 @@ Cliente no oficial ultraligero de WhatsApp Web para Linux, compilado nativamente
 - **Modo Privacidad Dual (`Alt + B`)**:
   - **Pulsacion simple (`Tap < 500ms`)**: Activa o desactiva un desenfoque optico instantaneo de la interfaz mediante overlay CSS (`backdrop-filter`). La aplicacion sigue visible pero el texto se vuelve ilegible y se bloquea la entrada. No requiere PIN.
   - **Mantener presionado (`Hold >= 500ms`)**: Bloquea por completo la sesion con una capsula flotante frosted glass que solicita un PIN de seguridad numerico (hasheado con SHA-256 y persistente ante reinicios).
-- **Confirmaciones de Lectura Bajo Demanda (`Alt + M`)**:
-  - Modo incognito que bloquea el envio automatico de confirmaciones de lectura al abrir chats y solo las envia temporalmente al responder un mensaje.
-- **Barra Lateral Redimensionable y Modo Compacto**:
-  - Arrastra el borde derecho de la barra de chats para ajustar su ancho o usa el boton de la cabecera para minimizarla a una columna de solo fotos de perfil (`70px`).
+- **Confirmaciones de Lectura Bajo Demanda**:
+  - Funciona automaticamente en modo incognito, bloqueando el envio automatico de confirmaciones de lectura (doble check azul) al abrir chats.
+  - Emite las confirmaciones de lectura de forma temporal al responder un mensaje, mediante la accion manual **"Marcar como leido"** del menu y automaticamente al abrir conversaciones de **Comunidades** o avisos de solo lectura.
+- **Barra Lateral Redimensionable y Modo Compacto (`Alt + M`)**:
+  - Arrastra el borde derecho de la barra lateral para ajustar su ancho de forma uniforme en todas las pestanas laterales (**Chats**, **Estados**, **Canales** y **Comunidades**), asi como el borde izquierdo del panel derecho de informacion del chat/perfil.
+  - Pulsa **`Alt + M`** o usa el boton de la cabecera para alternar el modo compacto de la barra lateral a una columna de solo avatares (`70px`).
 - **Atajos de Chat, Rueda y Badges Geometricos (`Alt + 1..9`, `Alt + 0`, `Alt + Rueda`)**:
   - Mientras mantienes presionada la tecla `Alt`, se muestran insignias circulares verdes numeradas sobre el avatar de los primeros 10 chats visibles (ignorando la fila de Archivados).
   - Pulsar `Alt + 1..9` o `Alt + 0` salta de inmediato al chat correspondiente, y `Alt + Rueda del raton` avanza o retrocede entre chats.
@@ -93,7 +95,7 @@ cmake --build build
 | :--- | :--- |
 | **`Alt + B` (Pulsar brevemente)** | Alternar modo privacidad rapido (desenfoque estetico sin PIN). |
 | **`Alt + B` (Mantener presionado)** | Bloquear aplicacion con PIN de seguridad. |
-| **`Alt + M`** | Activar/desactivar bloqueo de confirmaciones de lectura (modo incognito). |
+| **`Alt + M`** | Alternar modo compacto de la barra lateral (70px, solo avatares). |
 | **`Alt` (Mantener presionado)** | Mostrar insignias numericas sobre los primeros 10 chats. |
 | **`Alt + 1` .. `Alt + 9`** | Cambiar a los chats 1 al 9 de la lista lateral. |
 | **`Alt + 0`** | Cambiar al chat 10. |

@@ -57,6 +57,29 @@ void WhatsAppPage::handleNewWindowUrl(const QUrl &url, QWebEnginePage *tempPage)
 
 // --- WhatsAppClient ---
 
+namespace {
+
+inline bool isPureLeftAltModifier(Qt::KeyboardModifiers mods) {
+    return (mods & Qt::AltModifier) && !(mods & Qt::GroupSwitchModifier);
+}
+
+inline bool isLeftAltKeyEvent(const QKeyEvent *ke) {
+    return ke != nullptr
+        && ke->key() == Qt::Key_Alt
+        && !(ke->modifiers() & Qt::GroupSwitchModifier)
+        && ke->nativeScanCode() != 108u;
+}
+
+inline bool isAltGrKeyEvent(const QKeyEvent *ke) {
+    return ke != nullptr
+        && (ke->key() == Qt::Key_AltGr
+            || ke->key() == Qt::Key_Mode_switch
+            || static_cast<bool>(ke->modifiers() & Qt::GroupSwitchModifier)
+            || (ke->key() == Qt::Key_Alt && ke->nativeScanCode() == 108u));
+}
+
+} // namespace
+
 WhatsAppClient::WhatsAppClient(QWidget *parent)
     : QMainWindow(parent)
     , m_browser(nullptr)
@@ -242,12 +265,12 @@ void WhatsAppClient::handleNotification(std::unique_ptr<QWebEngineNotification> 
     }
 
     bool isLocked = (m_lockOverlay && m_lockOverlay->isLocked());
-    QString title = notification->title().replace('|', '-');
+    QString title = notification->title();
     QString body;
     if (isLocked) {
         body = "Nuevo mensaje (WhatsApp bloqueado)";
     } else {
-        body = notification->message().replace('\n', ' ').replace('|', '-');
+        body = notification->message().replace('\n', ' ');
     }
 
     QString iconPath;
@@ -456,7 +479,7 @@ void WhatsAppClient::hideEvent(QHideEvent *event) {
 
 void WhatsAppClient::showEvent(QShowEvent *event) {
     QMainWindow::showEvent(event);
-    if (!(QApplication::keyboardModifiers() & (Qt::AltModifier | Qt::GroupSwitchModifier))) {
+    if (!isPureLeftAltModifier(QApplication::keyboardModifiers())) {
         m_altKeyDown = false;
         m_wheelAccumulatedDelta = 0;
         hideChatBadges();
@@ -487,14 +510,14 @@ void WhatsAppClient::resizeEvent(QResizeEvent *event) {
 void WhatsAppClient::wheelEvent(QWheelEvent *event) {
     Qt::KeyboardModifiers mods = event->modifiers();
     Qt::KeyboardModifiers appMods = QApplication::keyboardModifiers();
-    bool sysAlt = (mods & (Qt::AltModifier | Qt::GroupSwitchModifier)) ||
-                  (appMods & (Qt::AltModifier | Qt::GroupSwitchModifier));
-    if (m_altKeyDown && !sysAlt) {
+    bool hasAltGr = (mods & Qt::GroupSwitchModifier) || (appMods & Qt::GroupSwitchModifier);
+    bool sysAlt = !hasAltGr && (isPureLeftAltModifier(mods) || isPureLeftAltModifier(appMods));
+    if (m_altKeyDown && hasAltGr) {
         m_altKeyDown = false;
         m_wheelAccumulatedDelta = 0;
         hideChatBadges();
     }
-    bool altPressed = sysAlt;
+    bool altPressed = (m_altKeyDown || sysAlt) && !hasAltGr;
 
     if (altPressed) {
         int delta = event->angleDelta().y();
@@ -575,7 +598,7 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
     }
 
     if (etype == QEvent::MouseButtonPress && m_altKeyDown) {
-        if (!(QApplication::keyboardModifiers() & (Qt::AltModifier | Qt::GroupSwitchModifier))) {
+        if (!isPureLeftAltModifier(QApplication::keyboardModifiers())) {
             m_altKeyDown = false;
             m_wheelAccumulatedDelta = 0;
             hideChatBadges();
@@ -593,16 +616,26 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
         auto *wheelEv = static_cast<QWheelEvent *>(event);
         Qt::KeyboardModifiers mods = wheelEv->modifiers();
         Qt::KeyboardModifiers appMods = QApplication::keyboardModifiers();
-        bool sysAlt = (mods & (Qt::AltModifier | Qt::GroupSwitchModifier)) ||
-                      (appMods & (Qt::AltModifier | Qt::GroupSwitchModifier));
-        if (m_altKeyDown && !sysAlt) {
+        bool hasAltGr = (mods & Qt::GroupSwitchModifier) || (appMods & Qt::GroupSwitchModifier);
+        bool sysAlt = !hasAltGr && (isPureLeftAltModifier(mods) || isPureLeftAltModifier(appMods));
+        if (m_altKeyDown && hasAltGr) {
             m_altKeyDown = false;
             m_wheelAccumulatedDelta = 0;
             hideChatBadges();
         }
-        bool altPressed = sysAlt;
+        bool altPressed = (m_altKeyDown || sysAlt) && !hasAltGr;
 
         if (altPressed) {
+            static quint64 lastWheelTimestamp = 0;
+            const quint64 wheelTimestamp = wheelEv->timestamp();
+            if (wheelTimestamp != 0 && wheelTimestamp == lastWheelTimestamp) {
+                wheelEv->accept();
+                return true;
+            }
+            if (wheelTimestamp != 0) {
+                lastWheelTimestamp = wheelTimestamp;
+            }
+
             int delta = wheelEv->angleDelta().y();
             if (delta == 0) {
                 delta = wheelEv->angleDelta().x();
@@ -648,7 +681,7 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
 
     if (etype == QEvent::KeyPress) {
         auto *keyEvent = static_cast<QKeyEvent *>(event);
-        if (keyEvent->key() == Qt::Key_B && (keyEvent->modifiers() & Qt::AltModifier)) {
+        if (keyEvent->key() == Qt::Key_B && isPureLeftAltModifier(keyEvent->modifiers())) {
             if (keyEvent->isAutoRepeat()) {
                 return true;
             }
@@ -671,7 +704,13 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
             return true;
         }
 
-        if ((keyEvent->key() == Qt::Key_Alt || keyEvent->key() == Qt::Key_AltGr) && !keyEvent->isAutoRepeat()) {
+        if (isAltGrKeyEvent(keyEvent)) {
+            if (m_altKeyDown) {
+                m_altKeyDown = false;
+                m_wheelAccumulatedDelta = 0;
+                hideChatBadges();
+            }
+        } else if (isLeftAltKeyEvent(keyEvent) && !keyEvent->isAutoRepeat()) {
             // El mismo KeyPress llega a varios filtros (qApp, m_browser, focusProxy, hijos):
             // solo la primera transicion a "presionado" muestra los badges.
             if (!m_altKeyDown) {
@@ -681,16 +720,15 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
                 }
             }
         } else if (m_altKeyDown &&
-                   keyEvent->key() != Qt::Key_Alt &&
-                   keyEvent->key() != Qt::Key_AltGr &&
-                   !(keyEvent->modifiers() & (Qt::AltModifier | Qt::GroupSwitchModifier))) {
+                   !isLeftAltKeyEvent(keyEvent) &&
+                   !isPureLeftAltModifier(keyEvent->modifiers())) {
             m_altKeyDown = false;
             m_wheelAccumulatedDelta = 0;
             hideChatBadges();
         }
     } else if (etype == QEvent::KeyRelease) {
         auto *keyEvent = static_cast<QKeyEvent *>(event);
-        if (m_altBDown && (keyEvent->key() == Qt::Key_B || keyEvent->key() == Qt::Key_Alt || keyEvent->key() == Qt::Key_AltGr)) {
+        if (m_altBDown && (keyEvent->key() == Qt::Key_B || keyEvent->key() == Qt::Key_Alt || isAltGrKeyEvent(keyEvent))) {
             if (keyEvent->isAutoRepeat()) {
                 return true;
             }
@@ -702,17 +740,23 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
 
             m_altBDown = false;
             m_altBHoldTriggered = false;
-            if (keyEvent->key() == Qt::Key_Alt || keyEvent->key() == Qt::Key_AltGr) {
-                m_altKeyDown = false;
+            if (keyEvent->key() == Qt::Key_Alt || isAltGrKeyEvent(keyEvent)) {
+                m_wheelAccumulatedDelta = 0;
+                if (m_altKeyDown) {
+                    m_altKeyDown = false;
+                    hideChatBadges();
+                }
             }
             return true;
         }
 
-        if ((keyEvent->key() == Qt::Key_Alt || keyEvent->key() == Qt::Key_AltGr) && !keyEvent->isAutoRepeat()) {
-            m_wheelAccumulatedDelta = 0;
+        if ((keyEvent->key() == Qt::Key_Alt || isAltGrKeyEvent(keyEvent)) && !keyEvent->isAutoRepeat()) {
             if (m_altKeyDown) {
                 m_altKeyDown = false;
+                m_wheelAccumulatedDelta = 0;
                 hideChatBadges();
+            } else if (isLeftAltKeyEvent(keyEvent)) {
+                m_wheelAccumulatedDelta = 0;
             }
         }
     }
@@ -1141,7 +1185,10 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
             if (getComputedStyle(chatRow).position === 'static') {
                 chatRow.style.position = 'relative';
             }
-            chatRow.style.setProperty('overflow', 'visible', 'important');
+            if (chatRow.style.getPropertyValue('overflow') !== 'visible' ||
+                chatRow.style.getPropertyPriority('overflow') !== 'important') {
+                chatRow.style.setProperty('overflow', 'visible', 'important');
+            }
 
             var badge = null;
             for (var cb = 0; cb < chatRow.children.length; cb++) {
@@ -1156,8 +1203,10 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
                 chatRow.appendChild(badge);
             }
             if (badge.textContent !== keyLabel) badge.textContent = keyLabel;
-            badge.style.top = badgeTop + 'px';
-            badge.style.left = badgeLeft + 'px';
+            var topStr = badgeTop + 'px';
+            var leftStr = badgeLeft + 'px';
+            if (badge.style.top !== topStr) badge.style.top = topStr;
+            if (badge.style.left !== leftStr) badge.style.left = leftStr;
             keep.push(badge);
         }
 
@@ -1252,8 +1301,8 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
     };
 
     // 6. Obtener el indice del chat seleccionado actualmente
-    window.__waGetCurrentChatIndex = function() {
-        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats() : [];
+    window.__waGetCurrentChatIndex = function(includeAllMounted) {
+        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats(!!includeAllMounted) : [];
         if (!validChats.length) return -1;
 
         // 1. Prioridad: atributo aria-selected en la fila o sus hijos
@@ -1304,10 +1353,10 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
 
     // 7. Navegacion secuencial por chats (+1 abajo, -1 arriba)
     window.__waNavigateChat = function(offset) {
-        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats() : [];
+        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats(true) : [];
         if (!validChats.length) return -1;
 
-        var currentIndex = window.__waGetCurrentChatIndex();
+        var currentIndex = window.__waGetCurrentChatIndex(true);
         var targetIndex = 0;
 
         if (currentIndex === -1) {
@@ -1368,11 +1417,20 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
         if (!wanted) return -1;
 
         var matchRow = function(row) {
-            var t = row.querySelector('span[title]') ||
-                    row.querySelector('div[data-testid="cell-frame-title"] span') ||
-                    row.querySelector('span[dir="auto"]');
-            var raw = t ? (t.getAttribute('title') || t.textContent || '') : (row.getAttribute('title') || '');
-            return norm(raw) === wanted;
+            var candidates = row.querySelectorAll('span[title], div[data-testid="cell-frame-title"] span, [role="gridcell"] span[dir="auto"], span[dir="auto"]');
+            for (var c = 0; c < candidates.length; c++) {
+                var el = candidates[c];
+                var attrTitle = el.getAttribute('title');
+                if (attrTitle && norm(attrTitle) === wanted) {
+                    return true;
+                }
+                var txt = (el.textContent || '').trim();
+                if (txt && norm(txt) === wanted) {
+                    return true;
+                }
+            }
+            var rowTitle = row.getAttribute('title');
+            return rowTitle ? norm(rowTitle) === wanted : false;
         };
 
         var tryFindInDom = function() {
@@ -1402,20 +1460,33 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
         }
 
         var pane = document.getElementById('pane-side');
-        if (!pane || pane.scrollHeight <= pane.clientHeight) {
+        if (!pane) {
+            return -1;
+        }
+        var scrollBox = pane;
+        if (scrollBox.scrollHeight <= scrollBox.clientHeight) {
+            var descendants = pane.querySelectorAll('div');
+            for (var sc = 0; sc < descendants.length; sc++) {
+                if (descendants[sc].scrollHeight > descendants[sc].clientHeight + 20 && descendants[sc].clientHeight > 100) {
+                    scrollBox = descendants[sc];
+                    break;
+                }
+            }
+        }
+        if (scrollBox.scrollHeight <= scrollBox.clientHeight) {
             return -1;
         }
 
-        var originalScrollTop = pane.scrollTop;
+        var originalScrollTop = scrollBox.scrollTop;
         var maxSteps = 25;
         var stepCount = 0;
-        var stepSize = Math.max(250, Math.floor(pane.clientHeight * 0.75));
-        var maxScroll = Math.max(0, pane.scrollHeight - pane.clientHeight);
+        var stepSize = Math.max(250, Math.floor(scrollBox.clientHeight * 0.75));
+        var maxScroll = Math.max(0, scrollBox.scrollHeight - scrollBox.clientHeight);
 
         if (originalScrollTop > 0) {
-            pane.scrollTop = 0;
+            scrollBox.scrollTop = 0;
         } else {
-            pane.scrollTop = Math.min(stepSize, maxScroll);
+            scrollBox.scrollTop = Math.min(stepSize, maxScroll);
         }
         stepCount = 1;
 
@@ -1430,20 +1501,20 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
                 return;
             }
 
-            var curMaxScroll = Math.max(0, pane.scrollHeight - pane.clientHeight);
-            if (pane.scrollTop >= curMaxScroll - 2 || stepCount >= maxSteps) {
-                pane.scrollTop = originalScrollTop;
+            var curMaxScroll = Math.max(0, scrollBox.scrollHeight - scrollBox.clientHeight);
+            if (scrollBox.scrollTop >= curMaxScroll - 2 || stepCount >= maxSteps) {
+                scrollBox.scrollTop = originalScrollTop;
                 return;
             }
 
-            var curStep = Math.max(250, Math.floor(pane.clientHeight * 0.75));
-            var nextScroll = Math.min(pane.scrollTop + curStep, curMaxScroll);
-            if (nextScroll <= pane.scrollTop) {
-                pane.scrollTop = originalScrollTop;
+            var curStep = Math.max(250, Math.floor(scrollBox.clientHeight * 0.75));
+            var nextScroll = Math.min(scrollBox.scrollTop + curStep, curMaxScroll);
+            if (nextScroll <= scrollBox.scrollTop) {
+                scrollBox.scrollTop = originalScrollTop;
                 return;
             }
 
-            pane.scrollTop = nextScroll;
+            scrollBox.scrollTop = nextScroll;
             stepCount++;
             window.__waFindChatTimer = setTimeout(stepSearch, 60);
         };
@@ -1459,7 +1530,14 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
         window.__waLastWheelNavTime = 0;
 
         function handleWheel(e) {
-            var isAlt = e.altKey || window.__waAltKeyDown;
+            var isAltGr = (e.getModifierState && e.getModifierState('AltGraph')) || (e.altKey && e.ctrlKey);
+            if (isAltGr && window.__waAltKeyDown) {
+                window.__waAltKeyDown = false;
+                if (window.__waHideAltBadges) {
+                    window.__waHideAltBadges();
+                }
+            }
+            var isAlt = !isAltGr && (e.altKey || window.__waAltKeyDown);
             if (isAlt) {
                 e.preventDefault();
                 e.stopPropagation();
@@ -1507,10 +1585,78 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
                     });
                 }, { passive: true });
             }
+            if (!pane.__waBadgeObserver && window.MutationObserver) {
+                var isBadgeNode = function(node) {
+                    return node && node.nodeType === 1 && node.classList && node.classList.contains('wa-alt-badge');
+                };
+                var isOnlyBadgeMutation = function(m) {
+                    if (m.type === 'attributes') {
+                        return isBadgeNode(m.target);
+                    }
+                    if (m.type === 'characterData') {
+                        return isBadgeNode(m.target && m.target.parentNode);
+                    }
+                    if (m.type === 'childList') {
+                        if (isBadgeNode(m.target)) {
+                            return true;
+                        }
+                        for (var a = 0; a < m.addedNodes.length; a++) {
+                            if (!isBadgeNode(m.addedNodes[a])) {
+                                return false;
+                            }
+                        }
+                        for (var r = 0; r < m.removedNodes.length; r++) {
+                            if (!isBadgeNode(m.removedNodes[r])) {
+                                return false;
+                            }
+                        }
+                        return true;
+                    }
+                    return false;
+                };
+                pane.__waBadgeObserver = new MutationObserver(function(mutations) {
+                    if (!window.__waAltKeyDown) return;
+                    var hasRelevant = false;
+                    for (var i = 0; i < mutations.length; i++) {
+                        if (!isOnlyBadgeMutation(mutations[i])) {
+                            hasRelevant = true;
+                            break;
+                        }
+                    }
+                    if (!hasRelevant || pane.__waBadgeMutRaf) return;
+                    pane.__waBadgeMutRaf = true;
+                    window.requestAnimationFrame(function() {
+                        pane.__waBadgeMutRaf = false;
+                        if (window.__waAltKeyDown && window.__waShowAltBadges) {
+                            window.__waShowAltBadges();
+                        }
+                    });
+                });
+                pane.__waBadgeObserver.observe(pane, {
+                    childList: true,
+                    subtree: true,
+                    attributes: true
+                });
+            }
         };
 
         window.addEventListener('keydown', function(e) {
-            if (e.key === 'Alt' || e.key === 'AltGraph') {
+            var isAltGrEvent = e.key === 'AltGraph' ||
+                               e.key === 'ISO_Level3_Shift' ||
+                               e.code === 'AltRight' ||
+                               e.location === 2 ||
+                               (e.getModifierState && e.getModifierState('AltGraph'));
+            if (isAltGrEvent) {
+                if (window.__waAltKeyDown) {
+                    window.__waAltKeyDown = false;
+                    window.__waHideAltBadges();
+                }
+                return;
+            }
+            if (e.key === 'Alt' &&
+                e.code !== 'AltRight' &&
+                e.location !== 2 &&
+                !(e.getModifierState && e.getModifierState('AltGraph'))) {
                 // Solo se marca el estado: C++ (eventFilter) es el unico que muestra los badges,
                 // evitando una segunda reconstruccion por la misma pulsacion.
                 window.__waAltKeyDown = true;
@@ -1518,18 +1664,26 @@ QString WhatsAppClient::getInitChatHelpersJs() const {
         }, true);
 
         window.addEventListener('keyup', function(e) {
-            if (e.key === 'Alt' || e.key === 'AltGraph') {
+            if (e.key === 'Alt' || e.key === 'AltGraph' || e.code === 'AltRight') {
                 window.__waAltKeyDown = false;
                 window.__waHideAltBadges();
             }
         }, true);
 
-        window.addEventListener('blur', function() {
-            if (!document.hasFocus()) {
-                window.__waAltKeyDown = false;
-                window.__waHideAltBadges();
-            }
-        });
+        if (!window.__waGlobalScrollBadgeAttached) {
+            window.__waGlobalScrollBadgeAttached = true;
+            var globalBadgeScrollRaf = false;
+            window.addEventListener('scroll', function() {
+                if (!window.__waAltKeyDown || globalBadgeScrollRaf) return;
+                globalBadgeScrollRaf = true;
+                window.requestAnimationFrame(function() {
+                    globalBadgeScrollRaf = false;
+                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
+                        window.__waShowAltBadges();
+                    }
+                });
+            }, { passive: true, capture: true });
+        }
 
         window.addEventListener('wheel', handleWheel, { passive: false, capture: true });
         document.addEventListener('wheel', handleWheel, { passive: false, capture: true });
@@ -1641,7 +1795,7 @@ void WhatsAppClient::onPageLoaded(bool ok) {
     if (!ok) {
         return;
     }
-    if (!(QApplication::keyboardModifiers() & (Qt::AltModifier | Qt::GroupSwitchModifier))) {
+    if (!isPureLeftAltModifier(QApplication::keyboardModifiers())) {
         m_altKeyDown = false;
         m_wheelAccumulatedDelta = 0;
     }
@@ -1842,36 +1996,144 @@ void WhatsAppClient::sendWhatsAppMessage(const QString &chatName, const QString 
 
     QString js = QString(R"JS(
         var targetChat = %1;
+        var msgText = %2;
         return window.__waFindAndOpenChat(targetChat, function() {
-            setTimeout(function() {
-                var composer = document.querySelector('#main footer div[contenteditable="true"]') ||
-                               document.querySelector('div[contenteditable="true"][data-tab="10"]');
-                if (!composer) return;
-                composer.focus();
-                document.execCommand('insertText', false, %2);
-                try { composer.dispatchEvent(new InputEvent('input', { bubbles: true, data: %2 })); } catch (e) {}
+            var isVisible = function(el) {
+                if (!el || !el.isConnected) return false;
+                try {
+                    var style = window.getComputedStyle(el);
+                    if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
+                } catch (e) {}
+                if (window.innerWidth > 0 && window.innerHeight > 0 && el.getBoundingClientRect) {
+                    var rect = el.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0;
+                }
+                return true;
+            };
 
-                setTimeout(function() {
-                    var sendIcon = document.querySelector('#main footer span[data-icon="wds-ic-send-filled"]') ||
-                                   document.querySelector('#main footer span[data-icon="send"]') ||
-                                   document.querySelector('#main footer span[data-testid="send"]') ||
-                                   document.querySelector('span[data-icon="wds-ic-send-filled"]') ||
-                                   document.querySelector('span[data-icon="send"]') ||
-                                   document.querySelector('span[data-testid="send"]');
-                    var btn = sendIcon ? (sendIcon.closest('button') || sendIcon.closest('[role="button"]')) :
-                              (document.querySelector('#main footer button[data-testid="compose-btn-send"]') ||
-                               document.querySelector('#main footer button[data-tab="11"]') ||
-                               document.querySelector('#main footer button[aria-label="Enviar"], #main footer button[aria-label="Send"]'));
-                    if (!btn) return;
-                    btn.click();
-                    if (window.__waTriggerTemporarySeen) {
-                        window.__waTriggerTemporarySeen();
-                    } else if (window.__waTriggerSeen) {
-                        setTimeout(window.__waTriggerSeen, 200);
-                        setTimeout(window.__waTriggerSeen, 600);
+            var findComposer = function() {
+                var selectors = [
+                    '#main footer div[contenteditable="true"]',
+                    '#main div[contenteditable="true"][data-tab="10"]',
+                    '#main div[contenteditable="true"][role="textbox"]'
+                ];
+                for (var i = 0; i < selectors.length; i++) {
+                    var matches = document.querySelectorAll(selectors[i]);
+                    for (var j = 0; j < matches.length; j++) {
+                        if (isVisible(matches[j])) {
+                            return matches[j];
+                        }
                     }
-                }, 150);
-            }, 400);
+                }
+                return null;
+            };
+
+            var findSendButton = function() {
+                var roots = [];
+                var footer = document.querySelector('#main footer');
+                if (footer) roots.push(footer);
+                roots.push(document);
+                var selectors = [
+                    'span[data-icon="wds-ic-send-filled"]',
+                    'span[data-icon="send"]',
+                    'span[data-testid="send"]',
+                    'button[data-testid="compose-btn-send"]',
+                    'button[data-tab="11"]',
+                    'button[aria-label="Enviar"]',
+                    'button[aria-label="Send"]'
+                ];
+                for (var r = 0; r < roots.length; r++) {
+                    for (var s = 0; s < selectors.length; s++) {
+                        var matches = roots[r].querySelectorAll(selectors[s]);
+                        for (var j = 0; j < matches.length; j++) {
+                            var btn = matches[j].closest('button, [role="button"]') || matches[j];
+                            if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' && isVisible(btn)) {
+                                return btn;
+                            }
+                        }
+                    }
+                }
+                return null;
+            };
+
+            var triggerSeen = function() {
+                if (window.__waTriggerTemporarySeen) {
+                    window.__waTriggerTemporarySeen();
+                } else if (window.__waTriggerSeen) {
+                    setTimeout(window.__waTriggerSeen, 200);
+                    setTimeout(window.__waTriggerSeen, 600);
+                } else {
+                    window.__waMarkingSeenActive = false;
+                }
+            };
+
+            var composerAttempts = 0;
+            var maxComposerAttempts = 25;
+            var pollComposer = function() {
+                composerAttempts++;
+                var composer = findComposer();
+                if (!composer) {
+                    if (composerAttempts < maxComposerAttempts) {
+                        setTimeout(pollComposer, 100);
+                    }
+                    return;
+                }
+
+                window.__waMarkingSeenActive = true;
+                composer.focus();
+                try {
+                    var range = document.createRange();
+                    range.selectNodeContents(composer);
+                    range.collapse(false);
+                    var sel = window.getSelection();
+                    if (sel) {
+                        sel.removeAllRanges();
+                        sel.addRange(range);
+                    }
+                } catch (e) {}
+
+                document.execCommand('insertText', false, msgText);
+                try {
+                    composer.dispatchEvent(new InputEvent('input', {
+                        bubbles: true,
+                        inputType: 'insertText',
+                        data: msgText
+                    }));
+                } catch (e) {}
+
+                var sendAttempts = 0;
+                var maxSendAttempts = 10;
+                var pollSend = function() {
+                    sendAttempts++;
+                    var btn = findSendButton();
+                    if (btn) {
+                        btn.click();
+                        triggerSeen();
+                        return;
+                    }
+                    if (sendAttempts < maxSendAttempts) {
+                        setTimeout(pollSend, 80);
+                        return;
+                    }
+                    var remainingText = (composer.innerText || composer.textContent || '').replace(/[\u200B\uFEFF]/g, '').trim();
+                    if (remainingText.length > 0) {
+                        composer.dispatchEvent(new KeyboardEvent('keydown', {
+                            key: 'Enter',
+                            code: 'Enter',
+                            keyCode: 13,
+                            which: 13,
+                            bubbles: true,
+                            cancelable: true
+                        }));
+                        triggerSeen();
+                    } else {
+                        window.__waMarkingSeenActive = false;
+                    }
+                };
+                setTimeout(pollSend, 80);
+            };
+
+            setTimeout(pollComposer, 100);
         });
     )JS").arg(jsonChat, jsonText);
 
@@ -2039,53 +2301,78 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
 
     window.__waTriggerSeen = window.__waTriggerTemporarySeen;
 
-    // Detecta si la conversacion abierta en #main es de Comunidad / avisos / solo lectura (sin compositor editable)
-    window.__waIsReadOnlyConversation = function(allowNoFooterFallback) {
+    // Detecta estrictamente si la conversacion abierta en #main es de solo lectura (Comunidades / solo administradores / grupo cerrado)
+    window.__waIsReadOnlyConversation = function() {
         var main = document.getElementById('main');
         if (!main) return false;
         var header = main.querySelector('header');
         if (!header) return false;
-
-        var composer = main.querySelector(
-            'footer div[contenteditable="true"], ' +
-            'div[contenteditable="true"][data-tab="10"], ' +
-            'div[contenteditable="true"][role="textbox"], ' +
-            'div[contenteditable="true"]'
+        var conversationBody = main.querySelector(
+            '[data-testid="conversation-panel-messages"], [role="application"], [role="region"]'
         );
-        if (composer) return false;
+        if (!conversationBody) return false;
 
-        var activePtt = main.querySelector('[data-icon="ptt-send"], [data-testid="ptt-send"], [data-testid="audio-send"]');
-        if (activePtt) return false;
+        var writableControl = main.querySelector(
+            '[contenteditable="true"], [contenteditable="plaintext-only"], ' +
+            '[role="textbox"], [data-tab="10"], textarea, ' +
+            'footer [contenteditable], ' +
+            '[data-icon="ptt"], [data-icon*="mic"], [data-testid*="ptt"], ' +
+            '[data-icon="ptt-send"], [data-testid="ptt-send"], [data-testid="audio-send"], ' +
+            '[data-icon="plus"], [data-icon="plus-rounded"], [data-icon="clip"], ' +
+            '[data-icon="smiley"], [data-icon*="expressions"], ' +
+            'button[data-testid="compose-btn-send"], [data-icon="wds-ic-send-filled"], [data-icon="send"]'
+        );
+        if (writableControl) return false;
 
-        var footer = main.querySelector('footer');
-        if (footer && (footer.children.length > 0 || (footer.innerText || footer.textContent || '').trim().length > 0)) {
-            return true;
+        var bottomBar = main.querySelector('footer');
+        if (!bottomBar) {
+            var mainRect = main.getBoundingClientRect();
+            if (mainRect.height > 0) {
+                var children = main.children;
+                for (var i = children.length - 1; i >= 0; i--) {
+                    var child = children[i];
+                    if (!child || child.tagName !== 'DIV' || child === header || child.contains(header)) {
+                        continue;
+                    }
+                    var rect = child.getBoundingClientRect();
+                    if (rect.width <= 0 || rect.height < 24 || rect.height > 130) {
+                        continue;
+                    }
+                    var isAtBottom = (rect.top >= mainRect.top + mainRect.height * 0.4) &&
+                        (rect.bottom >= mainRect.bottom - 32) &&
+                        (rect.bottom <= mainRect.bottom + 16);
+                    if (isAtBottom) {
+                        bottomBar = child;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!bottomBar) return false;
+
+        if (bottomBar.querySelector('input, textarea, [contenteditable], [role="textbox"]')) {
+            return false;
         }
 
-        var hasExplicitIndicator = main.querySelector(
-            '[data-testid*="announcement"], [data-testid*="read-only"], [data-testid*="only-admin"], ' +
-            'span[data-icon*="announcement"], span[data-icon*="megaphone"], span[data-icon*="community"]'
-        ) !== null;
+        var readOnlySelector =
+            '[data-testid*="read-only"], [data-testid*="only-admin"], [data-testid*="announcement"], ' +
+            'span[data-icon*="announcement"], span[data-icon*="megaphone"]';
+        var hasExplicitIndicator = (typeof bottomBar.matches === 'function' && bottomBar.matches(readOnlySelector)) ||
+            bottomBar.querySelector(readOnlySelector) !== null;
         if (hasExplicitIndicator) {
             return true;
         }
 
-        var mainText = (main.innerText || main.textContent || '');
-        if (/solo los administradores pueden enviar|only admins can send|only admins can post|apenas administradores podem enviar|no puedes enviar mensajes a este grupo|you can't send messages to this group|este grupo se cerr|this group has ended/i.test(mainText)) {
+        var bottomText = (bottomBar.innerText || bottomBar.textContent || '').trim();
+        if (bottomText.length >= 10 && bottomText.length <= 260 &&
+            /solo los administradores pueden enviar|only admins can send|only admins can post|apenas administradores podem enviar|no puedes enviar mensajes a este|you can't send messages to this|este grupo se cerr|this group has ended|solo quienes administran|only admins/i.test(bottomText)) {
             return true;
-        }
-
-        if (allowNoFooterFallback) {
-            var hasBody = main.querySelector('[role="application"], [role="region"], [data-testid="conversation-panel-messages"], div[tabindex="-1"]') !== null;
-            if (hasBody) {
-                return true;
-            }
         }
 
         return false;
     };
 
-    // Programa verificacion automatica a 250 ms y 650 ms tras abrir una conversacion
+    // Programa verificacion automatica a 450 ms y 950 ms tras abrir una conversacion
     window.__waScheduleReadOnlyChatCheck = function() {
         if (window.__waMarkingSeenActive) return;
         clearReadOnlyCheckTimers();
@@ -2093,18 +2380,18 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
         readOnlyCheckTimer1 = setTimeout(function() {
             readOnlyCheckTimer1 = null;
             if (window.__waMarkingSeenActive || window.__waHasRepliedInCurrentChat) return;
-            if (window.__waIsReadOnlyConversation && window.__waIsReadOnlyConversation(false)) {
+            if (window.__waIsReadOnlyConversation && window.__waIsReadOnlyConversation()) {
                 window.__waTriggerTemporarySeen();
             }
-        }, 250);
+        }, 450);
 
         readOnlyCheckTimer2 = setTimeout(function() {
             readOnlyCheckTimer2 = null;
             if (window.__waMarkingSeenActive || window.__waHasRepliedInCurrentChat) return;
-            if (window.__waIsReadOnlyConversation && window.__waIsReadOnlyConversation(true)) {
+            if (window.__waIsReadOnlyConversation && window.__waIsReadOnlyConversation()) {
                 window.__waTriggerTemporarySeen();
             }
-        }, 650);
+        }, 950);
     };
 
     // Detecta la accion manual "Marcar como leido" / "Mark as read", excluyendo "no leido" / "unread"
@@ -2348,13 +2635,21 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
 
     var STORAGE_KEY_WIDTH = 'wa_sidebar_width';
     var STORAGE_KEY_COMPACT = 'wa_sidebar_compact';
+    var STORAGE_KEY_RIGHT_WIDTH = 'wa_right_panel_width';
     var MIN_WIDTH = 280;
     var DEFAULT_WIDTH = 360;
+    var MIN_RIGHT_WIDTH = 220;
+    var DEFAULT_RIGHT_WIDTH = 340;
 
     var isDragging = false;
     var resizerElement = null;
     var rafPending = false;
     var targetClientX = 0;
+
+    var isRightDragging = false;
+    var rightResizerElement = null;
+    var rightRafPending = false;
+    var rightTargetClientX = 0;
 
     var cachedSideColumn = null;
     var cachedMainColumn = null;
@@ -2378,6 +2673,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         style.textContent = `
             :root {
                 --wa-sidebar-width: 360px;
+                --wa-right-panel-width: 340px;
                 --wa-resizer-hitbox-width: 8px;
                 --wa-resizer-line-width: 2px;
                 --wa-resizer-color-hover: #00a884;
@@ -2512,24 +2808,96 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 box-sizing: border-box !important;
             }
 
-            /* 3. Neutralizacion de paneles auxiliares cerrados (solo en modo .two) */
-            .two > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty {
+            /* 3. Neutralizacion de paneles auxiliares cerrados (.two, .three y contenedor flex),
+                  uniformizacion de drawers izquierdos y configuracion de columna derecha */
+            .two > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty,
+            .three > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty,
+            [data-wa-flex-container="true"] > *:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty {
                 width: 0 !important;
                 min-width: 0 !important;
                 max-width: 0 !important;
                 flex: 0 0 0px !important;
+                border: none !important;
                 display: none !important;
             }
 
-            /* 4. Divisor / Splitter */
-            #wa-custom-resizer {
+            [data-wa-left-drawer="true"] {
+                width: var(--wa-sidebar-width) !important;
+                min-width: var(--wa-sidebar-width) !important;
+                max-width: var(--wa-sidebar-width) !important;
+                flex: 0 0 var(--wa-sidebar-width) !important;
+                flex-basis: var(--wa-sidebar-width) !important;
+                overflow: hidden !important;
+                box-sizing: border-box !important;
+                background-color: var(--panel-background-deep, var(--background-default, #111b21)) !important;
+                border-right: 1px solid rgba(134, 150, 160, 0.22) !important;
+            }
+
+            [data-wa-left-drawer="true"] > div,
+            [data-wa-left-drawer="true"] > span:has([data-animate-drawer-left="true"]),
+            [data-wa-left-drawer="true"] [data-animate-drawer-left="true"],
+            [data-wa-left-drawer="true"] [data-animate-drawer-left="true"] > div,
+            #side [data-animate-drawer-left="true"],
+            #side [data-animate-drawer-left="true"] > div,
+            [data-wa-side-column="true"] [data-animate-drawer-left="true"],
+            [data-wa-side-column="true"] [data-animate-drawer-left="true"] > div,
+            [data-wa-side-column="true"] > span:has([data-animate-drawer-left="true"]),
+            [data-wa-side-column="true"] div:has(> [data-animate-drawer-left="true"]),
+            .two > div:has(#side) [data-animate-drawer-left="true"],
+            .three > div:has(#side) [data-animate-drawer-left="true"] {
+                width: 100% !important;
+                min-width: 100% !important;
+                max-width: 100% !important;
+                box-sizing: border-box !important;
+                overflow-x: hidden !important;
+            }
+
+            [data-wa-left-drawer="true"] [data-animate-drawer-left="true"],
+            #side [data-animate-drawer-left="true"],
+            [data-wa-side-column="true"] [data-animate-drawer-left="true"] {
+                overflow: hidden !important;
+                background-color: var(--panel-background-deep, var(--background-default, #111b21)) !important;
+            }
+
+            [data-wa-right-column="true"] {
+                width: var(--wa-right-panel-width) !important;
+                min-width: var(--wa-right-panel-width) !important;
+                max-width: var(--wa-right-panel-width) !important;
+                flex: 0 0 var(--wa-right-panel-width) !important;
+                flex-basis: var(--wa-right-panel-width) !important;
+                border-left: 1px solid rgba(134, 150, 160, 0.22) !important;
+                box-sizing: border-box !important;
+                overflow-x: hidden !important;
+                position: relative !important;
+            }
+
+            [data-wa-right-column="true"] > div,
+            [data-wa-right-column="true"] > span:has([data-animate-drawer-right="true"]),
+            [data-wa-right-column="true"] [data-animate-drawer-right="true"],
+            [data-wa-right-column="true"] [data-animate-drawer-right="true"] > div,
+            [data-wa-right-column="true"] header,
+            [data-wa-right-column="true"] section {
+                width: 100% !important;
+                min-width: 0 !important;
+                max-width: 100% !important;
+                box-sizing: border-box !important;
+                overflow-x: hidden !important;
+            }
+
+            /* 4. Divisores / Splitters (lateral izquierdo y panel derecho) */
+            body:not(.wa-sidebar-compact) [data-wa-side-column="true"] {
+                border-right: 1px solid rgba(134, 150, 160, 0.22) !important;
+            }
+
+            #wa-custom-resizer,
+            #wa-custom-right-resizer {
                 position: fixed !important;
                 top: 0 !important;
                 bottom: 0 !important;
                 width: var(--wa-resizer-hitbox-width) !important;
                 margin-left: calc(var(--wa-resizer-hitbox-width) / -2) !important;
                 cursor: col-resize !important;
-                z-index: 9999 !important;
+                z-index: 4 !important;
                 background-color: transparent !important;
                 user-select: none !important;
                 -webkit-user-select: none !important;
@@ -2537,20 +2905,28 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 display: none;
             }
 
-            #wa-custom-resizer::after {
+            #wa-custom-resizer.is-resizing,
+            #wa-custom-right-resizer.is-resizing {
+                z-index: 9999 !important;
+            }
+
+            #wa-custom-resizer::after,
+            #wa-custom-right-resizer::after {
                 content: '' !important;
                 position: absolute !important;
                 top: 0 !important;
                 bottom: 0 !important;
                 left: calc(50% - (var(--wa-resizer-line-width) / 2)) !important;
                 width: var(--wa-resizer-line-width) !important;
-                background-color: var(--wa-resizer-color-default) !important;
+                background-color: transparent !important;
                 transition: background-color 0.15s ease-in-out !important;
                 pointer-events: none !important;
             }
 
             #wa-custom-resizer:hover::after,
-            #wa-custom-resizer.is-resizing::after {
+            #wa-custom-resizer.is-resizing::after,
+            #wa-custom-right-resizer:hover::after,
+            #wa-custom-right-resizer.is-resizing::after {
                 background-color: var(--wa-resizer-color-hover) !important;
             }
 
@@ -2566,7 +2942,6 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                toasts/drawers que WhatsApp monta como hermanos de #side dentro de la columna) */
             body.wa-sidebar-compact #side,
             body.wa-sidebar-compact [data-wa-side-column="true"],
-            body.wa-sidebar-compact #side div,
             body.wa-sidebar-compact .two > div:has(#side),
             body.wa-sidebar-compact .three > div:has(#side) {
                 width: 70px !important;
@@ -2611,22 +2986,36 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 z-index: 99999 !important;
             }
 
-            /* Linea vertical residual: capas hermanas (drawers/overlays cerrados) del contenedor flex;
-               se excluye .three para permitir la apertura del panel de informacion/multimedia. */
-            [data-wa-flex-container="true"]:not(.three) > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not(:has(header)):not(:has([role="alert"], [role="status"], [data-testid*="toast"])) {
+            /* Linea vertical residual: capas hermanas (drawers/overlays cerrados o sin contenido real)
+               del contenedor flex, incluso cuando .three esta presente. */
+            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not([data-wa-left-drawer="true"]):not([data-wa-right-column="true"]):not(header):not(:has(header)):not(:has([role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast])) {
                 border-right: none !important;
                 border-left: none !important;
                 box-shadow: none !important;
                 max-width: var(--wa-sidebar-width, 30%) !important;
             }
-            [data-wa-flex-container="true"]:not(.three) > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"])::before,
-            [data-wa-flex-container="true"]:not(.three) > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"])::after,
+            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not([data-wa-left-drawer="true"]):not([data-wa-right-column="true"]):not(header)::before,
+            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not([data-wa-left-drawer="true"]):not([data-wa-right-column="true"]):not(header)::after,
             [data-wa-flex-container="true"]::before,
             [data-wa-flex-container="true"]::after {
                 border: none !important;
                 box-shadow: none !important;
             }
-            [data-wa-flex-container="true"]:not(.three) > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):empty {
+            [data-wa-flex-container="true"] > [data-wa-aux-empty="true"] {
+                width: 0 !important;
+                min-width: 0 !important;
+                max-width: 0 !important;
+                flex: 0 0 0px !important;
+                border: none !important;
+                box-shadow: none !important;
+                overflow: hidden !important;
+            }
+            [data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not([data-wa-left-drawer="true"]):not([data-wa-right-column="true"]):empty {
+                width: 0 !important;
+                min-width: 0 !important;
+                max-width: 0 !important;
+                flex: 0 0 0px !important;
+                border: none !important;
                 display: none !important;
             }
 
@@ -2687,12 +3076,13 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 margin: 0 !important;
             }
 
-            body.wa-sidebar-compact #side > div:not(#pane-side):not(header),
-            body.wa-sidebar-compact #side [role="search"],
-            body.wa-sidebar-compact #side div:has(input),
-            body.wa-sidebar-compact #side div:has([data-tab="3"]),
-            body.wa-sidebar-compact #side div:has(span[data-icon="search"]),
-            body.wa-sidebar-compact #side [data-testid="chat-list-search"] {
+            body.wa-sidebar-compact #side > div:not(#pane-side):not(header):not(:has(#pane-side)):not(:has(header)),
+            body.wa-sidebar-compact #side div:has(> #pane-side) > div:not(#pane-side):not(header):not(:has(header)):not(:has([role="alert"], [role="status"], [data-testid*="toast"])),
+            body.wa-sidebar-compact #side [role="search"]:not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has(input):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has([data-tab="3"]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has(span[data-icon="search"]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
+            body.wa-sidebar-compact #side [data-testid="chat-list-search"]:not(#pane-side):not(:has(#pane-side)):not(#pane-side *) {
                 display: none !important;
                 height: 0 !important;
                 min-height: 0 !important;
@@ -2704,12 +3094,11 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 visibility: hidden !important;
             }
 
-            body.wa-sidebar-compact #side [role="tablist"],
-            body.wa-sidebar-compact #side div:has(> [role="tablist"]),
-            body.wa-sidebar-compact #side div[role="region"]:has(button),
-            body.wa-sidebar-compact #side div:has(button[role="button"][value]),
-            body.wa-sidebar-compact #side button:has(span[data-icon="filter"]),
-            body.wa-sidebar-compact #side div:has(span[data-icon="filter"]) {
+            body.wa-sidebar-compact #side [role="tablist"]:not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has(> [role="tablist"]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has(button[role="button"][value]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *),
+            body.wa-sidebar-compact #side button:has(span[data-icon="filter"]):not(#pane-side):not(:has(#pane-side)):not(#pane-side *),
+            body.wa-sidebar-compact #side div:has(span[data-icon="filter"]):not(#pane-side):not(:has(#pane-side)):not(:has(header)):not(#pane-side *) {
                 display: none !important;
                 height: 0 !important;
                 min-height: 0 !important;
@@ -2721,17 +3110,18 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 visibility: hidden !important;
             }
 
-            body.wa-sidebar-compact #side [data-testid="archived"],
-            body.wa-sidebar-compact #side [data-testid="archive"],
-            body.wa-sidebar-compact #side [aria-label*="Archiv"],
-            body.wa-sidebar-compact #side [aria-label*="archiv"],
+            body.wa-sidebar-compact #side [data-testid="archived"]:not(#pane-side):not(:has(#pane-side)),
+            body.wa-sidebar-compact #side [data-testid="archive"]:not(#pane-side):not(:has(#pane-side)),
+            body.wa-sidebar-compact #side [aria-label*="Archiv"]:not(#pane-side):not(:has(#pane-side)),
+            body.wa-sidebar-compact #side [aria-label*="archiv"]:not(#pane-side):not(:has(#pane-side)),
             body.wa-sidebar-compact #side div[role="listitem"]:has(span[data-icon*="archiv"]),
             body.wa-sidebar-compact #side div[role="row"]:has(span[data-icon*="archiv"]),
-            body.wa-sidebar-compact #side button:has(span[data-icon*="archiv"]),
-            body.wa-sidebar-compact #side div:has(> span[data-icon*="archiv"]),
+            body.wa-sidebar-compact #side button:has(span[data-icon*="archiv"]):not(#pane-side):not(:has(#pane-side)),
+            body.wa-sidebar-compact #side div:has(> span[data-icon*="archiv"]):not(#pane-side):not(:has(#pane-side)),
             body.wa-sidebar-compact #side span[data-icon="archive"],
             body.wa-sidebar-compact #side span[data-icon="archived"],
-            body.wa-sidebar-compact .wa-archived-row {
+            body.wa-sidebar-compact .wa-archived-row,
+            body.wa-sidebar-compact #side [data-wa-compact-hide="true"] {
                 display: none !important;
                 height: 0 !important;
                 min-height: 0 !important;
@@ -2743,10 +3133,13 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 visibility: hidden !important;
             }
 
+            body.wa-sidebar-compact #side div:has(> #pane-side),
             body.wa-sidebar-compact #pane-side {
                 width: 70px !important;
+                min-width: 70px !important;
                 max-width: 70px !important;
                 overflow-x: hidden !important;
+                box-sizing: border-box !important;
                 scrollbar-width: none !important;
             }
 
@@ -2756,13 +3149,12 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             }
 
             /* Filas y celdas del listado de chats en modo compacto */
-            body.wa-sidebar-compact #pane-side [role="row"],
-            body.wa-sidebar-compact #pane-side [role="listitem"],
-            body.wa-sidebar-compact #pane-side [role="gridcell"],
-            body.wa-sidebar-compact #pane-side [role="row"] > div,
-            body.wa-sidebar-compact #pane-side [role="listitem"] > div,
-            body.wa-sidebar-compact #pane-side [role="gridcell"] > div,
-            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] {
+            body.wa-sidebar-compact #pane-side [role="row"]:not([data-wa-compact-hide="true"]),
+            body.wa-sidebar-compact #pane-side [role="listitem"]:not([data-wa-compact-hide="true"]),
+            body.wa-sidebar-compact #pane-side [role="row"]:not([data-wa-compact-hide="true"]) > div:not([role="gridcell"]):not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
+            body.wa-sidebar-compact #pane-side [role="listitem"]:not([data-wa-compact-hide="true"]) > div:not([role="gridcell"]):not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:not([data-wa-compact-hide="true"]),
+            body.wa-sidebar-compact #pane-side div:has(> [data-wa-avatar-col="true"]) {
                 width: 70px !important;
                 max-width: 70px !important;
                 min-width: 70px !important;
@@ -2777,21 +3169,19 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             }
 
             /* Ocultacion universal de texto, fecha, preview, badges nativos y chinchetas (preservando .wa-alt-badge) */
-            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="row"] > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="listitem"] > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="gridcell"] > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="row"] > div > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="listitem"] > div > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="gridcell"] > div > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="row"] > div > div > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="listitem"] > div > div > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="row"] > div > div > div > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="listitem"] > div > div > div > :not(:first-child):not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="row"] div:has(> img) ~ *:not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> img) ~ *:not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="row"] div[role="button"] ~ *:not(.wa-alt-badge),
-            body.wa-sidebar-compact #pane-side [role="listitem"] div[role="button"] ~ *:not(.wa-alt-badge),
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="row"] > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="row"] > div > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *):not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *):not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="row"] div:has(> img) ~ *:not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *),
+            body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> img) ~ *:not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *),
+            body.wa-sidebar-compact #pane-side [role="row"] div[role="button"] ~ *:not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *),
+            body.wa-sidebar-compact #pane-side [role="listitem"] div[role="button"] ~ *:not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *),
+            body.wa-sidebar-compact #pane-side [role="gridcell"]:not(:has(img)):not(:has(svg)),
+            body.wa-sidebar-compact #pane-side [data-wa-text-col="true"],
+            body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) [data-wa-text-col="true"],
+            body.wa-sidebar-compact #pane-side [data-wa-compact-hide="true"],
             body.wa-sidebar-compact #pane-side [data-testid="cell-frame-title"],
             body.wa-sidebar-compact #pane-side [data-testid="cell-frame-primary"],
             body.wa-sidebar-compact #pane-side [data-testid="cell-frame-secondary"],
@@ -2825,15 +3215,15 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             }
 
             /* Columna del avatar: Dimension fija estricta de 49px x 49px centrada */
-            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :first-child,
-            body.wa-sidebar-compact #pane-side [role="row"] > :first-child,
-            body.wa-sidebar-compact #pane-side [role="listitem"] > :first-child,
-            body.wa-sidebar-compact #pane-side [role="gridcell"] > :first-child,
-            body.wa-sidebar-compact #pane-side [role="row"] > div > :first-child,
-            body.wa-sidebar-compact #pane-side [role="listitem"] > div > :first-child,
-            body.wa-sidebar-compact #pane-side [role="gridcell"] > div > :first-child,
-            body.wa-sidebar-compact #pane-side [role="row"] > div > div > :first-child,
-            body.wa-sidebar-compact #pane-side [role="listitem"] > div > div > :first-child {
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :first-child:not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="row"] > :first-child:not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > :first-child:not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="row"] > div > :first-child:not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > :first-child:not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="row"] > div > div > :first-child:not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > div > div > :first-child:not(:has([data-wa-avatar-col="true"])),
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"],
+            body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) [data-wa-avatar-col="true"] {
                 width: 49px !important;
                 min-width: 49px !important;
                 max-width: 49px !important;
@@ -2852,10 +3242,13 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             }
 
             /* Envoltorios internos del avatar: neutralizacion de paddings nativos */
-            body.wa-sidebar-compact #pane-side [role="row"] div:has(> img),
-            body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> img),
-            body.wa-sidebar-compact #pane-side [role="row"] div:has(> span[data-icon]),
-            body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> span[data-icon]),
+            body.wa-sidebar-compact #pane-side [role="row"] div:has(> img):not([data-wa-text-col="true"]):not([data-wa-text-col="true"] *),
+            body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> img):not([data-wa-text-col="true"]):not([data-wa-text-col="true"] *),
+            body.wa-sidebar-compact #pane-side [role="row"] div:has(> span[data-icon]):not([data-wa-text-col="true"]):not([data-wa-text-col="true"] *),
+            body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> span[data-icon]):not([data-wa-text-col="true"]):not([data-wa-text-col="true"] *),
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"] div:has(> img),
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"] div:has(> span[data-icon]),
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"] div[role="button"],
             body.wa-sidebar-compact #pane-side [role="row"] span[data-icon="default-user"],
             body.wa-sidebar-compact #pane-side [role="row"] span[data-icon="default-group"],
             body.wa-sidebar-compact #pane-side [role="row"] span[data-icon="community-outline"],
@@ -2886,6 +3279,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             /* Imagen de perfil del avatar centrada y dimensionada */
             body.wa-sidebar-compact #pane-side [role="row"] img,
             body.wa-sidebar-compact #pane-side [role="listitem"] img,
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"] img,
             body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] img {
                 width: 49px !important;
                 min-width: 49px !important;
@@ -2906,6 +3300,9 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             body.wa-sidebar-compact #pane-side [role="listitem"]:not(:has([data-icon*="community"])) img,
             body.wa-sidebar-compact #pane-side [role="row"]:not(:has([data-icon*="community"])) div[role="button"],
             body.wa-sidebar-compact #pane-side [role="listitem"]:not(:has([data-icon*="community"])) div[role="button"],
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"]:not(:has([data-icon*="community"])) img,
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"]:not(:has([data-icon*="community"])) div[role="button"],
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"]:not(:has([data-icon*="community"])) div:has(> img),
             body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:not(:has([data-icon*="community"])) img {
                 border-radius: 50% !important;
                 overflow: hidden !important;
@@ -2915,6 +3312,9 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]):has([data-icon*="community"]) img,
             body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]):has([data-icon*="community"]) div[role="button"],
             body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]):has([data-icon*="community"]) div:has(> img),
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"]:has([data-icon*="community"]) img,
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"]:has([data-icon*="community"]) div[role="button"],
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"]:has([data-icon*="community"]) div:has(> img),
             body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:has([data-icon*="community"]) img,
             body.wa-sidebar-compact #pane-side span[data-icon*="community"] svg,
             body.wa-sidebar-compact #pane-side span[data-icon*="community"] {
@@ -2923,9 +3323,10 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             }
 
             /* Superposicion de aro SVG de historia o estado */
-            body.wa-sidebar-compact #pane-side [role="row"] > :first-child svg:not([data-icon]),
-            body.wa-sidebar-compact #pane-side [role="listitem"] > :first-child svg:not([data-icon]),
-            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :first-child svg:not([data-icon]) {
+            body.wa-sidebar-compact #pane-side [role="row"] > :first-child svg:not([data-icon]):not(span[data-icon] svg),
+            body.wa-sidebar-compact #pane-side [role="listitem"] > :first-child svg:not([data-icon]):not(span[data-icon] svg),
+            body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"] svg:not([data-icon]):not(span[data-icon] svg),
+            body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :first-child svg:not([data-icon]):not(span[data-icon] svg) {
                 position: absolute !important;
                 top: 50% !important;
                 left: 50% !important;
@@ -3148,37 +3549,268 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         };
     }
 
+    function getMaxRightWidth() {
+        var sideWidth = 70;
+        if (!isCompactActive()) {
+            var containers = resolveLayoutContainers();
+            var sideCol = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
+            var rectW = sideCol ? Math.round(sideCol.getBoundingClientRect().width) : 0;
+            sideWidth = rectW > 0 ? rectW : getSavedWidth();
+        }
+        return Math.max(MIN_RIGHT_WIDTH, Math.min(Math.floor(window.innerWidth * 0.5), window.innerWidth - sideWidth - 260));
+    }
+
+    function getSavedRightWidth() {
+        var saved = localStorage.getItem(STORAGE_KEY_RIGHT_WIDTH);
+        var parsed = parseInt(saved, 10);
+        var base = (isNaN(parsed) || parsed < MIN_RIGHT_WIDTH) ? DEFAULT_RIGHT_WIDTH : parsed;
+        var maxRight = getMaxRightWidth();
+        return Math.max(MIN_RIGHT_WIDTH, Math.min(base, maxRight));
+    }
+
+    function applyRightColumnInlineWidth(rightCol, widthPx) {
+        if (!rightCol) return;
+        rightCol.style.setProperty('flex', '0 0 ' + widthPx + 'px', 'important');
+        rightCol.style.setProperty('flex-basis', widthPx + 'px', 'important');
+        rightCol.style.setProperty('flex-grow', '0', 'important');
+        rightCol.style.setProperty('flex-shrink', '0', 'important');
+        rightCol.style.setProperty('width', widthPx + 'px', 'important');
+        rightCol.style.setProperty('min-width', widthPx + 'px', 'important');
+        rightCol.style.setProperty('max-width', widthPx + 'px', 'important');
+        rightCol.style.setProperty('overflow-x', 'hidden', 'important');
+        rightCol.style.setProperty('border-left', '1px solid rgba(134, 150, 160, 0.22)', 'important');
+    }
+
+    function setRightPanelWidth(width, persist) {
+        var maxRight = getMaxRightWidth();
+        var numericWidth = (typeof width === 'number' && !isNaN(width)) ? width : DEFAULT_RIGHT_WIDTH;
+        var clamped = Math.max(MIN_RIGHT_WIDTH, Math.min(Math.round(numericWidth), maxRight));
+
+        document.documentElement.style.setProperty('--wa-right-panel-width', clamped + 'px');
+
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (rightCol) {
+            applyRightColumnInlineWidth(rightCol, clamped);
+        }
+
+        if (persist) {
+            localStorage.setItem(STORAGE_KEY_RIGHT_WIDTH, clamped.toString());
+        }
+
+        updateRightResizerPosition();
+    }
+
+    function clearAuxInlineStyles(el) {
+        if (!el) return;
+        el.style.removeProperty('flex');
+        el.style.removeProperty('flex-basis');
+        el.style.removeProperty('flex-grow');
+        el.style.removeProperty('flex-shrink');
+        el.style.removeProperty('width');
+        el.style.removeProperty('min-width');
+        el.style.removeProperty('max-width');
+        el.style.removeProperty('overflow');
+        el.style.removeProperty('overflow-x');
+        el.style.removeProperty('border');
+        el.style.removeProperty('border-left');
+        el.style.removeProperty('border-right');
+        el.style.removeProperty('background-color');
+    }
+
     function syncAuxDrawers(container, sideCol, mainCol) {
         if (!container) return;
         var side = document.querySelector('#side');
         var mainEl = document.querySelector('#main');
+        var sideRect = sideCol ? sideCol.getBoundingClientRect() : null;
+        var targetSideW = isCompactActive() ? getSavedWidth() : Math.round((sideRect && sideRect.width) || getSavedWidth());
+        var hasRightCol = false;
         var children = container.children;
+
         for (var i = 0; i < children.length; i++) {
             var child = children[i];
             if (child === sideCol || child === mainCol ||
                 (side && child.contains(side)) || (mainEl && child.contains(mainEl))) {
                 continue;
             }
-            var isOpen = container.classList.contains('three') ||
-                         child.querySelector('header, section, [role="region"]') !== null ||
-                         child.children.length > 0;
-            if (!isOpen) {
+
+            var isStandaloneToast = !child.querySelector('header, section, [data-animate-drawer-left="true"], [data-animate-drawer-right="true"]') &&
+                                    (child.matches('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') ||
+                                     child.querySelector('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') !== null);
+            if (isStandaloneToast) {
+                if (child.hasAttribute('data-wa-left-drawer') || child.hasAttribute('data-wa-right-column') || child.hasAttribute('data-wa-aux-empty')) {
+                    clearAuxInlineStyles(child);
+                }
+                child.removeAttribute('data-wa-left-drawer');
+                child.removeAttribute('data-wa-right-column');
+                child.removeAttribute('data-wa-aux-empty');
+                continue;
+            }
+
+            var hasRealContent = child.children.length > 0 &&
+                                 (child.querySelector('header, section, [role="region"], [role="heading"], [data-animate-drawer-left="true"], [data-animate-drawer-right="true"], button, [role="button"]') !== null ||
+                                  (child.innerText || '').trim().length > 0);
+            var isAfterMain = mainCol ? !!(mainCol.compareDocumentPosition(child) & Node.DOCUMENT_POSITION_FOLLOWING) : false;
+            if (child.querySelector('[data-animate-drawer-left="true"]') && !child.querySelector('[data-animate-drawer-right="true"]')) {
+                isAfterMain = false;
+            } else if (isAfterMain && mainCol) {
+                var cR = child.getBoundingClientRect();
+                var mR = mainCol.getBoundingClientRect();
+                if (cR.width > 0 && mR.width > 0 && cR.left < mR.left + 20) {
+                    isAfterMain = false;
+                }
+            }
+
+            if (!hasRealContent) {
+                child.removeAttribute('data-wa-left-drawer');
+                child.removeAttribute('data-wa-right-column');
+                child.setAttribute('data-wa-aux-empty', 'true');
+                child.style.removeProperty('background-color');
+                child.style.removeProperty('border-left');
+                child.style.removeProperty('border-right');
+                child.style.removeProperty('overflow-x');
                 child.style.setProperty('flex', '0 0 0px', 'important');
                 child.style.setProperty('flex-grow', '0', 'important');
+                child.style.setProperty('flex-shrink', '0', 'important');
                 child.style.setProperty('width', '0px', 'important');
+                child.style.setProperty('min-width', '0px', 'important');
                 child.style.setProperty('max-width', '0px', 'important');
+                child.style.setProperty('border', 'none', 'important');
+                child.style.setProperty('overflow', 'hidden', 'important');
+            } else if (!isAfterMain) {
+                if (child.hasAttribute('data-wa-aux-empty')) {
+                    clearAuxInlineStyles(child);
+                    child.removeAttribute('data-wa-aux-empty');
+                }
+                var childRect = child.getBoundingClientRect();
+                var isNavRail = (child.tagName === 'HEADER') ||
+                                (sideCol &&
+                                 !!(child.compareDocumentPosition(sideCol) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+                                 !child.hasAttribute('data-wa-left-drawer') &&
+                                 !child.querySelector('[data-animate-drawer-left="true"], section, [role="region"], [role="heading"], h1, h2, input, [role="textbox"], [role="row"], [role="listitem"], [role="grid"]') &&
+                                 childRect.width > 0 && childRect.width <= 96 &&
+                                 sideRect && childRect.right <= sideRect.left + 2);
+                if (isNavRail) {
+                    if (child.hasAttribute('data-wa-left-drawer') || child.hasAttribute('data-wa-right-column')) {
+                        clearAuxInlineStyles(child);
+                    }
+                    child.removeAttribute('data-wa-left-drawer');
+                    child.removeAttribute('data-wa-right-column');
+                    continue;
+                }
+
+                var childPos = window.getComputedStyle(child).position;
+                var absOverlay = null;
+                if (childPos !== 'absolute' && childPos !== 'fixed') {
+                    var innerCand = child.querySelector('[data-animate-drawer-left="true"]') || child.firstElementChild;
+                    if (innerCand) {
+                        var innerPos = window.getComputedStyle(innerCand).position;
+                        if (innerPos === 'absolute' || innerPos === 'fixed') {
+                            absOverlay = innerCand;
+                        }
+                    }
+                }
+
+                if (absOverlay) {
+                    clearAuxInlineStyles(child);
+                    child.removeAttribute('data-wa-left-drawer');
+                    child.removeAttribute('data-wa-right-column');
+                    child.style.setProperty('flex', '0 0 0px', 'important');
+                    child.style.setProperty('width', '0px', 'important');
+                    child.style.setProperty('min-width', '0px', 'important');
+                    child.style.setProperty('overflow', 'visible', 'important');
+                    var absRect = absOverlay.getBoundingClientRect();
+                    var absW = targetSideW;
+                    if (sideRect && absRect.width > 0 && absRect.left < sideRect.left) {
+                        absW = Math.max(targetSideW, Math.round((sideRect.left + targetSideW) - absRect.left));
+                    }
+                    absOverlay.style.setProperty('width', absW + 'px', 'important');
+                    absOverlay.style.setProperty('min-width', absW + 'px', 'important');
+                    absOverlay.style.setProperty('max-width', absW + 'px', 'important');
+                    absOverlay.style.setProperty('overflow', 'hidden', 'important');
+                    absOverlay.style.setProperty('border-right', '1px solid rgba(134, 150, 160, 0.22)', 'important');
+                    absOverlay.style.setProperty('background-color', 'var(--panel-background-deep, var(--background-default, #111b21))', 'important');
+                    continue;
+                }
+
+                child.removeAttribute('data-wa-right-column');
+                child.setAttribute('data-wa-left-drawer', 'true');
+
+                var drawerW = targetSideW;
+                if (sideRect && childRect.width > 0 && childRect.left < sideRect.left) {
+                    var sideRight = sideRect.left + targetSideW;
+                    drawerW = Math.max(targetSideW, Math.round(sideRight - childRect.left));
+                }
+
+                child.style.removeProperty('border');
+                child.style.removeProperty('border-left');
+                child.style.setProperty('flex', '0 0 ' + drawerW + 'px', 'important');
+                child.style.setProperty('flex-basis', drawerW + 'px', 'important');
+                child.style.setProperty('flex-grow', '0', 'important');
+                child.style.setProperty('flex-shrink', '0', 'important');
+                child.style.setProperty('width', drawerW + 'px', 'important');
+                child.style.setProperty('min-width', drawerW + 'px', 'important');
+                child.style.setProperty('max-width', drawerW + 'px', 'important');
+                child.style.setProperty('overflow', 'hidden', 'important');
+                child.style.setProperty('border-right', '1px solid rgba(134, 150, 160, 0.22)', 'important');
+                child.style.setProperty('background-color', 'var(--panel-background-deep, var(--background-default, #111b21))', 'important');
             } else {
-                child.style.removeProperty('flex');
-                child.style.removeProperty('flex-grow');
-                child.style.removeProperty('width');
-                child.style.removeProperty('max-width');
+                if (child.hasAttribute('data-wa-aux-empty')) {
+                    clearAuxInlineStyles(child);
+                    child.removeAttribute('data-wa-aux-empty');
+                }
+                hasRightCol = true;
+                child.removeAttribute('data-wa-left-drawer');
+                child.setAttribute('data-wa-right-column', 'true');
+
+                if (!isRightDragging) {
+                    var rw = Math.max(MIN_RIGHT_WIDTH, Math.min(getSavedRightWidth(), getMaxRightWidth()));
+                    document.documentElement.style.setProperty('--wa-right-panel-width', rw + 'px');
+                    child.style.removeProperty('overflow');
+                    child.style.removeProperty('border');
+                    child.style.removeProperty('border-right');
+                    child.style.removeProperty('background-color');
+                    applyRightColumnInlineWidth(child, rw);
+                }
             }
         }
+
+        var leftDrawers = container.querySelectorAll('[data-animate-drawer-left="true"]');
+        for (var j = 0; j < leftDrawers.length; j++) {
+            var dl = leftDrawers[j];
+            if (dl.children.length === 0) continue;
+            var inLeftDrawer = !!dl.closest('[data-wa-left-drawer="true"]');
+            var inSideCol = !!(sideCol && sideCol.contains(dl));
+            if (inLeftDrawer || (inSideCol && !isCompactActive())) {
+                var dlRect = dl.getBoundingClientRect();
+                if (sideRect && inSideCol && !isCompactActive() && dlRect.width > 0 && dlRect.left < sideRect.left - 1) {
+                    var dlW = Math.max(targetSideW, Math.round((sideRect.left + targetSideW) - dlRect.left));
+                    dl.style.setProperty('width', dlW + 'px', 'important');
+                    dl.style.setProperty('min-width', dlW + 'px', 'important');
+                    dl.style.setProperty('max-width', dlW + 'px', 'important');
+                } else {
+                    dl.style.setProperty('width', '100%', 'important');
+                    dl.style.setProperty('min-width', '100%', 'important');
+                    dl.style.setProperty('max-width', '100%', 'important');
+                }
+            } else {
+                dl.style.setProperty('width', targetSideW + 'px', 'important');
+                dl.style.setProperty('min-width', targetSideW + 'px', 'important');
+                dl.style.setProperty('max-width', targetSideW + 'px', 'important');
+                dl.style.setProperty('background-color', 'var(--panel-background-deep, var(--background-default, #111b21))', 'important');
+            }
+            dl.style.setProperty('box-sizing', 'border-box', 'important');
+        }
+
+        if (hasRightCol) {
+            ensureRightResizer();
+        }
+        updateResizerPosition();
     }
 
     function setSidebarWidth(width, persist) {
         var max = getMaxWidth();
-        var clamped = Math.max(MIN_WIDTH, Math.min(width, max));
+        var numericWidth = (typeof width === 'number' && !isNaN(width)) ? width : DEFAULT_WIDTH;
+        var clamped = Math.max(MIN_WIDTH, Math.min(Math.round(numericWidth), max));
 
         document.documentElement.style.setProperty('--wa-sidebar-width', clamped + 'px');
 
@@ -3189,6 +3821,8 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             var mainCol = containers.mainColumn;
 
             if (sideCol) {
+                sideCol.style.removeProperty('border-right');
+                sideCol.style.removeProperty('overflow');
                 sideCol.style.setProperty('width', clamped + 'px', 'important');
                 sideCol.style.setProperty('min-width', clamped + 'px', 'important');
                 sideCol.style.setProperty('max-width', clamped + 'px', 'important');
@@ -3198,6 +3832,8 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             }
 
             if (side && side !== sideCol) {
+                side.style.removeProperty('border-right');
+                side.style.removeProperty('overflow');
                 side.style.setProperty('width', '100%', 'important');
                 side.style.setProperty('min-width', '100%', 'important');
                 side.style.setProperty('max-width', '100%', 'important');
@@ -3205,6 +3841,8 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 side.style.setProperty('flex-grow', '1', 'important');
                 side.style.setProperty('flex-shrink', '1', 'important');
             } else if (side) {
+                side.style.removeProperty('border-right');
+                side.style.removeProperty('overflow');
                 side.style.setProperty('width', clamped + 'px', 'important');
                 side.style.setProperty('min-width', clamped + 'px', 'important');
                 side.style.setProperty('max-width', clamped + 'px', 'important');
@@ -3228,7 +3866,6 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
                 mainEl.style.setProperty('flex', '1 1 auto', 'important');
             }
 
-            // Neutralizar solo cajones auxiliares cerrados sin bloquear el panel de info abierto (.three)
             syncAuxDrawers(containers.flexContainer, sideCol, mainCol);
         }
 
@@ -3239,7 +3876,7 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         updateResizerPosition();
     }
 
-    function updateResizerPosition() {
+    function updateLeftResizerPosition() {
         if (!resizerElement) return;
 
         if (isCompactActive()) {
@@ -3267,6 +3904,34 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         resizerElement.style.top = rect.top + 'px';
         resizerElement.style.height = rect.height + 'px';
         resizerElement.style.left = rect.right + 'px';
+    }
+
+    function updateRightResizerPosition() {
+        if (!rightResizerElement) return;
+
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (!rightCol) {
+            rightResizerElement.style.display = 'none';
+            rightResizerElement.style.left = '-9999px';
+            return;
+        }
+
+        var rRect = rightCol.getBoundingClientRect();
+        if (rRect.width <= 0 || rRect.height <= 0) {
+            rightResizerElement.style.display = 'none';
+            rightResizerElement.style.left = '-9999px';
+            return;
+        }
+
+        rightResizerElement.style.display = 'block';
+        rightResizerElement.style.top = rRect.top + 'px';
+        rightResizerElement.style.height = rRect.height + 'px';
+        rightResizerElement.style.left = rRect.left + 'px';
+    }
+
+    function updateResizerPosition() {
+        updateLeftResizerPosition();
+        updateRightResizerPosition();
     }
 
     function onMouseDown(e) {
@@ -3322,6 +3987,61 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         if (targetEl) {
             var currentWidth = Math.round(targetEl.getBoundingClientRect().width);
             setSidebarWidth(currentWidth, true);
+        }
+    }
+
+    function onRightMouseDown(e) {
+        if (e.button !== 0) return;
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (!rightCol) return;
+
+        e.preventDefault();
+        isRightDragging = true;
+        if (rightResizerElement) {
+            rightResizerElement.classList.add('is-resizing');
+        }
+        document.documentElement.classList.add('wa-resizing-active');
+
+        window.addEventListener('mousemove', onRightMouseMove, { passive: false, capture: true });
+        window.addEventListener('mouseup', onRightMouseUp, { once: true, capture: true });
+    }
+
+    function onRightMouseMove(e) {
+        if (!isRightDragging) return;
+        e.preventDefault();
+        rightTargetClientX = e.clientX;
+
+        if (!rightRafPending) {
+            rightRafPending = true;
+            window.requestAnimationFrame(function() {
+                rightRafPending = false;
+                if (!isRightDragging) return;
+
+                var rightCol = document.querySelector('[data-wa-right-column="true"]');
+                if (!rightCol) return;
+
+                var rightEdge = rightCol.getBoundingClientRect().right;
+                var calculatedWidth = rightEdge - rightTargetClientX;
+                setRightPanelWidth(calculatedWidth, false);
+            });
+        }
+    }
+
+    function onRightMouseUp(e) {
+        if (!isRightDragging) return;
+        isRightDragging = false;
+
+        if (rightResizerElement) {
+            rightResizerElement.classList.remove('is-resizing');
+        }
+        document.documentElement.classList.remove('wa-resizing-active');
+
+        window.removeEventListener('mousemove', onRightMouseMove, { capture: true });
+
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (rightCol) {
+            var currentWidth = Math.round(rightCol.getBoundingClientRect().width);
+            setRightPanelWidth(currentWidth, true);
         }
     }
 
@@ -3426,23 +4146,256 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
     }
 
     function syncAvatarTooltips() {
-        if (!isCompactActive()) return;
+        if (!isCompactActive()) {
+            if (syncAvatarTooltips.__dirty !== false) {
+                var stale = document.querySelectorAll('[data-wa-compact-hide], [data-wa-avatar-col], [data-wa-text-col]');
+                for (var s = 0; s < stale.length; s++) {
+                    stale[s].removeAttribute('data-wa-compact-hide');
+                    stale[s].removeAttribute('data-wa-avatar-col');
+                    stale[s].removeAttribute('data-wa-text-col');
+                }
+                syncAvatarTooltips.__dirty = false;
+            }
+            return;
+        }
+        syncAvatarTooltips.__dirty = true;
+
         var pane = document.getElementById('pane-side');
         if (!pane) return;
 
-        var rows = pane.querySelectorAll('[role="row"], [role="listitem"], div[data-testid="cell-frame-container"]');
-        for (var i = 0; i < rows.length; i++) {
-            var row = rows[i];
-            if (row.hasAttribute('title')) continue;
-            var titleEl = row.querySelector('span[title]') || 
-                          row.querySelector('[data-testid="cell-frame-title"]') ||
-                          row.querySelector('span[dir="auto"]');
-            if (titleEl) {
-                var name = titleEl.getAttribute('title') || titleEl.textContent || '';
-                if (name.trim()) {
-                    row.setAttribute('title', name.trim());
+        if (!pane.__waCompactScrollAttached) {
+            pane.__waCompactScrollAttached = true;
+            var scrollRaf = false;
+            pane.addEventListener('scroll', function() {
+                if (!isCompactActive() || scrollRaf) return;
+                scrollRaf = true;
+                window.requestAnimationFrame(function() {
+                    scrollRaf = false;
+                    syncAvatarTooltips();
+                });
+            }, { passive: true });
+        }
+
+        function isTextSiblingEl(el, avatarEl) {
+            if (!el || el.nodeType !== 1) return false;
+            if (el.classList && el.classList.contains('wa-alt-badge')) return false;
+            if (el === avatarEl || el.contains(avatarEl)) return false;
+            var tag = el.tagName ? el.tagName.toLowerCase() : '';
+            if (tag === 'svg' || tag === 'path' || el.hasAttribute('data-icon')) return false;
+            if (el.getAttribute('role') === 'gridcell' ||
+                el.querySelector('[role="gridcell"], [data-testid="cell-frame-title"], [data-testid="cell-frame-primary"], [data-testid="cell-frame-secondary"], span[title], span[dir="auto"]') !== null) {
+                return true;
+            }
+            var nonSvgText = '';
+            for (var cn = 0; cn < el.childNodes.length; cn++) {
+                var ch = el.childNodes[cn];
+                if (ch.nodeType === 3) {
+                    nonSvgText += ch.nodeValue;
+                } else if (ch.nodeType === 1 && ch.tagName && ch.tagName.toLowerCase() !== 'svg' && !ch.hasAttribute('data-icon')) {
+                    nonSvgText += ch.textContent;
                 }
             }
+            return nonSvgText.trim().length > 0;
+        }
+
+        // Ocultar bloques de aviso de cifrado y elementos de Archivados fuera de filas de chat
+        var lockIcons = pane.querySelectorAll('span[data-icon*="lock"], [data-testid*="encrypt"], a[href*="encryption"], a[href*="28030015"]');
+        for (var l = 0; l < lockIcons.length; l++) {
+            var lockEl = lockIcons[l];
+            if (lockEl.closest('[role="row"], [role="listitem"]')) continue;
+            var lockTarget = lockEl;
+            while (lockTarget.parentElement && lockTarget.parentElement !== pane &&
+                   !lockTarget.parentElement.querySelector('[role="row"], [role="listitem"]') &&
+                   !lockTarget.parentElement.matches('[role="grid"], [role="region"], [role="list"]')) {
+                lockTarget = lockTarget.parentElement;
+            }
+            if (lockTarget !== pane &&
+                !lockTarget.matches('[role="grid"], [role="region"], [role="list"]') &&
+                !lockTarget.querySelector('[role="row"], [role="listitem"], [role="grid"], [role="region"], [role="list"]')) {
+                if (lockTarget.getAttribute('data-wa-compact-hide') !== 'true') {
+                    lockTarget.setAttribute('data-wa-compact-hide', 'true');
+                }
+            }
+        }
+
+        function hideNonRowBlocks(node) {
+            if (!node || node.nodeType !== 1) return;
+            if (node.matches('[role="row"], [role="listitem"]')) return;
+            if (node.getAttribute('data-wa-compact-hide') === 'true') return;
+
+            var hasRowsOrList = node.querySelector('[role="row"], [role="listitem"], [role="grid"], [role="region"], [role="list"]') !== null;
+            if (node !== pane && !hasRowsOrList && !node.matches('[role="grid"], [role="region"], [role="list"]')) {
+                var txt = (node.textContent || '').trim();
+                var hasLock = node.querySelector('span[data-icon*="lock"], [data-testid*="encrypt"], a[href*="encryption"], a[href*="28030015"]') !== null;
+                var hasArchive = node.querySelector('span[data-icon*="archiv"], [data-testid*="archiv"]') !== null;
+                var isEncryptTxt = /(cifrad|extremo a extremo|end-to-end|encrypt|criptograf)/i.test(txt);
+                var isArchiveTxt = /^(archivados|archived|arquivadas)(\s*\d+)?$/i.test(txt);
+                if (hasLock || hasArchive || isEncryptTxt || isArchiveTxt) {
+                    node.setAttribute('data-wa-compact-hide', 'true');
+                    return;
+                }
+            }
+
+            var children = node.children;
+            for (var c = 0; c < children.length; c++) {
+                hideNonRowBlocks(children[c]);
+            }
+        }
+        hideNonRowBlocks(pane);
+
+        var rows = pane.querySelectorAll('[role="row"], [role="listitem"]');
+        if (rows.length > 0) {
+            // Ocultar hermanos sin filas del contenedor de lista dentro de #pane-side (p. ej. aviso de cifrado al pie)
+            var listAncestor = rows[0].parentElement;
+            if (listAncestor && listAncestor !== pane) {
+                var chain = listAncestor.parentElement;
+                var childInChain = listAncestor;
+                while (chain && pane.contains(chain)) {
+                    var siblings = chain.children;
+                    for (var sb = 0; sb < siblings.length; sb++) {
+                        var sib = siblings[sb];
+                        if (sib === childInChain) continue;
+                        if (sib.classList && sib.classList.contains('wa-alt-badge')) continue;
+                        if (sib.matches('[role="row"], [role="listitem"]')) continue;
+                        if (sib.querySelector('[role="row"], [role="listitem"]')) continue;
+                        if ((sib.textContent && sib.textContent.trim().length > 0) ||
+                            sib.querySelector('svg, button, a, span') !== null) {
+                            if (sib.getAttribute('data-wa-compact-hide') !== 'true') {
+                                sib.setAttribute('data-wa-compact-hide', 'true');
+                            }
+                        }
+                    }
+                    if (chain === pane) break;
+                    childInChain = chain;
+                    chain = chain.parentElement;
+                }
+            }
+        } else {
+            rows = pane.querySelectorAll('div[data-testid="cell-frame-container"]');
+        }
+
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+
+            var isPinned = row.querySelector('span[data-icon*="pin"], [data-testid*="pin"]') !== null;
+            if (!isPinned) {
+                var hasArchiveIcon = row.querySelector('span[data-icon*="archiv"], [data-testid*="archiv"]') !== null;
+                var rowFullText = (row.textContent || '').trim();
+                var isArchivedRow = hasArchiveIcon || /^(archivados|archived|arquivadas)(\s*\d+)?$/i.test(rowFullText);
+                var isNoticeRow = !row.querySelector('img, span[title], [data-testid="cell-frame-title"]') &&
+                                  (row.querySelector('span[data-icon*="lock"], [data-testid*="encrypt"]') !== null ||
+                                   /(cifrad|extremo a extremo|end-to-end|encrypt|criptograf)/i.test(rowFullText));
+                if (isArchivedRow || isNoticeRow) {
+                    if (row.getAttribute('data-wa-compact-hide') !== 'true') {
+                        row.setAttribute('data-wa-compact-hide', 'true');
+                    }
+                    continue;
+                }
+            }
+            if (row.hasAttribute('data-wa-compact-hide')) {
+                row.removeAttribute('data-wa-compact-hide');
+            }
+
+            var titleEl = row.querySelector('[data-testid="cell-frame-title"]') ||
+                          row.querySelector('span[title]') ||
+                          row.querySelector('span[dir="auto"]');
+            if (titleEl) {
+                var name = (titleEl.getAttribute('title') || titleEl.textContent || '').trim();
+                if (name && row.getAttribute('title') !== name) {
+                    row.setAttribute('title', name);
+                }
+            }
+
+            var avatarEl = row.querySelector(
+                'img, span[data-icon*="default-"], span[data-icon*="community"], ' +
+                'span[data-icon*="avatar"], span[data-icon*="channel"], span[data-icon*="newsletter"], svg'
+            );
+            if (!avatarEl) continue;
+
+            var avatarCol = null;
+            var flexParent = null;
+            var curr = avatarEl;
+            while (curr && curr !== row) {
+                var parent = curr.parentElement;
+                if (!parent || !row.contains(parent)) break;
+                var hasTextSib = false;
+                var pChildren = parent.children;
+                for (var k = 0; k < pChildren.length; k++) {
+                    if (pChildren[k] !== curr && isTextSiblingEl(pChildren[k], avatarEl)) {
+                        hasTextSib = true;
+                        break;
+                    }
+                }
+                if (hasTextSib) {
+                    avatarCol = curr;
+                    flexParent = parent;
+                    break;
+                }
+                curr = parent;
+            }
+
+            if (avatarCol && flexParent) {
+                var oldCols = row.querySelectorAll('[data-wa-avatar-col], [data-wa-text-col]');
+                for (var oc = 0; oc < oldCols.length; oc++) {
+                    var oldEl = oldCols[oc];
+                    if (oldEl !== avatarCol && oldEl.parentElement !== flexParent) {
+                        oldEl.removeAttribute('data-wa-avatar-col');
+                        oldEl.removeAttribute('data-wa-text-col');
+                    }
+                }
+
+                if (avatarCol.getAttribute('data-wa-avatar-col') !== 'true') {
+                    avatarCol.setAttribute('data-wa-avatar-col', 'true');
+                }
+                if (avatarCol.hasAttribute('data-wa-text-col')) {
+                    avatarCol.removeAttribute('data-wa-text-col');
+                }
+
+                var cols = flexParent.children;
+                for (var j = 0; j < cols.length; j++) {
+                    var col = cols[j];
+                    if (col === avatarCol) continue;
+                    if ((col.classList && col.classList.contains('wa-alt-badge')) || col.contains(avatarEl)) {
+                        if (col.hasAttribute('data-wa-text-col')) {
+                            col.removeAttribute('data-wa-text-col');
+                        }
+                        continue;
+                    }
+                    if (col.getAttribute('data-wa-text-col') !== 'true') {
+                        col.setAttribute('data-wa-text-col', 'true');
+                    }
+                    if (col.hasAttribute('data-wa-avatar-col')) {
+                        col.removeAttribute('data-wa-avatar-col');
+                    }
+                }
+            }
+        }
+    }
+
+    function ensureRightResizer() {
+        if (!rightResizerElement || !document.body.contains(rightResizerElement)) {
+            rightResizerElement = document.getElementById('wa-custom-right-resizer');
+            if (!rightResizerElement) {
+                rightResizerElement = document.createElement('div');
+                rightResizerElement.id = 'wa-custom-right-resizer';
+                rightResizerElement.setAttribute('role', 'separator');
+                rightResizerElement.setAttribute('aria-orientation', 'vertical');
+                rightResizerElement.setAttribute('title', 'Arrastra para redimensionar el panel de informacion');
+                document.body.appendChild(rightResizerElement);
+            }
+            rightResizerElement.removeEventListener('mousedown', onRightMouseDown);
+            rightResizerElement.addEventListener('mousedown', onRightMouseDown);
+        }
+
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (window.ResizeObserver && rightCol && !rightCol.__waRightResizeObserverAttached) {
+            rightCol.__waRightResizeObserverAttached = true;
+            var rightResizeObserver = new ResizeObserver(function() {
+                if (!isRightDragging) {
+                    updateRightResizerPosition();
+                }
+            });
+            rightResizeObserver.observe(rightCol);
         }
     }
 
@@ -3466,6 +4419,8 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             resizerElement.addEventListener('mousedown', onMouseDown);
         }
 
+        ensureRightResizer();
+
         var containers = resolveLayoutContainers();
         var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : side;
 
@@ -3473,7 +4428,10 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
             targetEl.__waResizeObserverAttached = true;
             var resizeObserver = new ResizeObserver(function() {
                 if (!isDragging) {
-                    updateResizerPosition();
+                    updateLeftResizerPosition();
+                }
+                if (!isRightDragging) {
+                    updateRightResizerPosition();
                 }
             });
             resizeObserver.observe(targetEl);
@@ -3547,6 +4505,11 @@ QString WhatsAppClient::getSidebarEnhancementsJs() const {
         if (!isCompactActive()) {
             var curWidth = getSavedWidth();
             setSidebarWidth(curWidth, false);
+        }
+        if (document.querySelector('[data-wa-right-column="true"]')) {
+            setRightPanelWidth(getSavedRightWidth(), false);
+        } else {
+            updateRightResizerPosition();
         }
     });
 })();
