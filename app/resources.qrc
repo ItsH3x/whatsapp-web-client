@@ -1,0 +1,9 @@
+<RCC>
+    <qresource prefix="/web">
+        <file alias="chat_helpers.js">web/chat_helpers.js</file>
+        <file alias="read_receipt_blocker.js">web/read_receipt_blocker.js</file>
+        <file alias="sidebar_enhancements.css">web/sidebar_enhancements.css</file>
+        <file alias="sidebar_enhancements.js">web/sidebar_enhancements.js</file>
+    </qresource>
+</RCC>
+

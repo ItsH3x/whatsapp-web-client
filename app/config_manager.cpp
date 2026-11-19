@@ -5,6 +5,11 @@
 #include <QJsonDocument>
 #include <QCryptographicHash>
 
+namespace {
+bool g_cacheLoaded = false;
+QJsonObject g_cachedConfig;
+} // namespace
+
 QString ConfigManager::configFilePath()
 {
     return QDir::homePath() + QStringLiteral("/.local/share/WhatsAppWebClient/config.json");
@@ -13,14 +18,22 @@ QString ConfigManager::configFilePath()
 void ConfigManager::ensureDirectoryExists()
 {
     const QString dirPath = QDir::homePath() + QStringLiteral("/.local/share/WhatsAppWebClient");
-    QDir().mkpath(dirPath);
+    if (!QDir(dirPath).exists()) {
+        QDir().mkpath(dirPath);
+    }
 }
 
 QJsonObject ConfigManager::readConfigFile()
 {
+    if (g_cacheLoaded) {
+        return g_cachedConfig;
+    }
+
+    g_cacheLoaded = true;
     QFile file(configFilePath());
     if (!file.exists() || !file.open(QIODevice::ReadOnly | QIODevice::Text)) {
-        return QJsonObject();
+        g_cachedConfig = QJsonObject();
+        return g_cachedConfig;
     }
 
     const QByteArray data = file.readAll();
@@ -28,10 +41,12 @@ QJsonObject ConfigManager::readConfigFile()
 
     const QJsonDocument doc = QJsonDocument::fromJson(data);
     if (!doc.isObject()) {
-        return QJsonObject();
+        g_cachedConfig = QJsonObject();
+        return g_cachedConfig;
     }
 
-    return doc.object();
+    g_cachedConfig = doc.object();
+    return g_cachedConfig;
 }
 
 bool ConfigManager::writeConfigFile(const QJsonObject &config)
@@ -46,6 +61,8 @@ bool ConfigManager::writeConfigFile(const QJsonObject &config)
     const QJsonDocument doc(config);
     file.write(doc.toJson(QJsonDocument::Indented));
     file.close();
+    g_cachedConfig = config;
+    g_cacheLoaded = true;
     return true;
 }
 
@@ -93,6 +110,9 @@ bool ConfigManager::isAppLocked()
 void ConfigManager::setAppLocked(bool locked)
 {
     QJsonObject config = readConfigFile();
+    if (config.contains(QStringLiteral("is_locked")) && config.value(QStringLiteral("is_locked")).toBool(false) == locked) {
+        return;
+    }
     config.insert(QStringLiteral("is_locked"), locked);
     writeConfigFile(config);
 }

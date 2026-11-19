@@ -1,0 +1,4561 @@
+(function() {
+    'use strict';
+    if (window.__waSidebarEnhancementsInitialized) return;
+    window.__waSidebarEnhancementsInitialized = true;
+
+    var STORAGE_KEY_WIDTH = 'wa_sidebar_width';
+    var STORAGE_KEY_COMPACT = 'wa_sidebar_compact';
+    var STORAGE_KEY_RIGHT_WIDTH = 'wa_right_panel_width';
+    var MIN_WIDTH = 280;
+    var DEFAULT_WIDTH = 360;
+    var MIN_RIGHT_WIDTH = 220;
+    var DEFAULT_RIGHT_WIDTH = 340;
+
+    var isDragging = false;
+    var currentSidebarWidth = getSavedWidth();
+    var resizerElement = null;
+    var rafPending = false;
+    var targetClientX = 0;
+
+    var isRightDragging = false;
+    var rightResizerElement = null;
+    var rightRafPending = false;
+    var rightTargetClientX = 0;
+
+    var cachedSideColumn = null;
+    var cachedMainColumn = null;
+    var cachedFlexContainer = null;
+
+    var MAIN_SCALE_THRESHOLD = 450;
+    var MAIN_SCALE_MIN = 0.55;
+    var OVERLAY_CHECK_SELECTOR = '[data-animate-modal-popup="true"], [data-animate-modal-backdrop="true"], ' +
+                                 '[data-animate-modal-media="true"], [data-animate-picker="true"], ' +
+                                 '[data-animate-dropdown-item="true"], [data-testid="media-viewer"], ' +
+                                 '[data-testid="popup-contents"], [role="dialog"], [role="menu"], ' +
+                                 '#wa-privacy-blur-overlay';
+
+    var compactAnimTimer = null;
+    var hoverTooltipEl = null;
+    var hoverTooltipActiveRow = null;
+    var currentMainScale = 1;
+    var mainScaleRafPending = false;
+    var overlayCheckRafPending = false;
+    var lastPointerX = null;
+    var lastPointerY = null;
+    var accentSyncTimer = null;
+    var lastAppliedAccent = '';
+    var lastAppliedAccentFg = '';
+    var lastMainThemeAccent = (function() {
+        try {
+            var raw = localStorage.getItem('wa_last_theme_accent');
+            if (raw) {
+                var parsed = JSON.parse(raw);
+                if (parsed && typeof parsed.r === 'number') return parsed;
+            }
+        } catch (e) {}
+        return null;
+    })();
+    var accentProbeEl = null;
+
+    var SVG_COLLAPSE = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">' +
+                       '<path d="M15.41 7.41L14 6l-6 6 6 6 1.41-1.41L10.83 12z"/>' +
+                       '</svg>';
+
+    var SVG_EXPAND = '<svg viewBox="0 0 24 24" width="20" height="20" fill="currentColor">' +
+                     '<path d="M10 6L8.59 7.41 13.17 12l-4.58 4.59L10 18l6-6z"/>' +
+                     '</svg>';
+
+    function injectStyles() {
+        var existing = document.getElementById('wa-sidebar-enhancements-style');
+        if (existing) {
+            existing.remove();
+        }
+        var style = document.createElement('style');
+        style.id = 'wa-sidebar-enhancements-style';
+        style.textContent = __WA_SIDEBAR_CSS__;
+        document.head.appendChild(style);
+    }
+
+    function getMaxWidth() {
+        return Math.floor(window.innerWidth * 0.5);
+    }
+
+    function getSavedWidth() {
+        var saved = localStorage.getItem(STORAGE_KEY_WIDTH);
+        var parsed = parseInt(saved, 10);
+        if (isNaN(parsed) || parsed < MIN_WIDTH) {
+            return DEFAULT_WIDTH;
+        }
+        var max = getMaxWidth();
+        if (parsed > max) {
+            return max;
+        }
+        return parsed;
+    }
+
+    function isCompactActive() {
+        return document.body.classList.contains('wa-sidebar-compact');
+    }
+
+    function updateButtonAppearance(btn, isCompact) {
+        if (!btn) return;
+        btn.innerHTML = isCompact ? SVG_EXPAND : SVG_COLLAPSE;
+        var label = isCompact ? 'Expandir barra lateral' : 'Minimizar barra lateral';
+        btn.setAttribute('title', label);
+        btn.setAttribute('aria-label', label);
+    }
+
+    function parseCssColor(str) {
+        if (!str || typeof str !== 'string') return null;
+        var s = str.trim().toLowerCase();
+        if (!s || s === 'transparent' || s === 'none' || s === 'inherit' || s === 'initial' || s === 'unset') {
+            return null;
+        }
+        var rgbMatch = s.match(/^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/);
+        if (rgbMatch) {
+            var r = Math.max(0, Math.min(255, Math.round(parseFloat(rgbMatch[1]))));
+            var g = Math.max(0, Math.min(255, Math.round(parseFloat(rgbMatch[2]))));
+            var b = Math.max(0, Math.min(255, Math.round(parseFloat(rgbMatch[3]))));
+            var a = 1;
+            if (rgbMatch[4] !== undefined) {
+                a = rgbMatch[4].indexOf('%') !== -1 ? parseFloat(rgbMatch[4]) / 100 : parseFloat(rgbMatch[4]);
+            }
+            return { r: r, g: g, b: b, a: isNaN(a) ? 1 : a };
+        }
+        var hexMatch = s.match(/^#([0-9a-f]{3}|[0-9a-f]{6}|[0-9a-f]{8})$/);
+        if (hexMatch) {
+            var hex = hexMatch[1];
+            if (hex.length === 3) {
+                return {
+                    r: parseInt(hex.charAt(0) + hex.charAt(0), 16),
+                    g: parseInt(hex.charAt(1) + hex.charAt(1), 16),
+                    b: parseInt(hex.charAt(2) + hex.charAt(2), 16),
+                    a: 1
+                };
+            }
+            var alpha = hex.length === 8 ? parseInt(hex.slice(6, 8), 16) / 255 : 1;
+            return {
+                r: parseInt(hex.slice(0, 2), 16),
+                g: parseInt(hex.slice(2, 4), 16),
+                b: parseInt(hex.slice(4, 6), 16),
+                a: alpha
+            };
+        }
+        var srgbMatch = s.match(/^color\(\s*srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+%?))?\s*\)$/);
+        if (srgbMatch) {
+            var sa = 1;
+            if (srgbMatch[4] !== undefined) {
+                sa = srgbMatch[4].indexOf('%') !== -1 ? parseFloat(srgbMatch[4]) / 100 : parseFloat(srgbMatch[4]);
+            }
+            return {
+                r: Math.max(0, Math.min(255, Math.round(parseFloat(srgbMatch[1]) * 255))),
+                g: Math.max(0, Math.min(255, Math.round(parseFloat(srgbMatch[2]) * 255))),
+                b: Math.max(0, Math.min(255, Math.round(parseFloat(srgbMatch[3]) * 255))),
+                a: isNaN(sa) ? 1 : sa
+            };
+        }
+        return null;
+    }
+
+    function rgbToHsl(r, g, b) {
+        var rn = r / 255;
+        var gn = g / 255;
+        var bn = b / 255;
+        var max = Math.max(rn, gn, bn);
+        var min = Math.min(rn, gn, bn);
+        var l = (max + min) / 2;
+        var s = 0;
+        if (max !== min) {
+            var d = max - min;
+            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+        }
+        return { s: s, l: l };
+    }
+
+    function isValidAccentColor(rgba) {
+        if (!rgba || rgba.a < 0.5) return false;
+        var chroma = Math.max(rgba.r, rgba.g, rgba.b) - Math.min(rgba.r, rgba.g, rgba.b);
+        if (chroma < 18) return false;
+        var hsl = rgbToHsl(rgba.r, rgba.g, rgba.b);
+        return hsl.s >= 0.22 && hsl.l >= 0.08 && hsl.l <= 0.88;
+    }
+
+    function rgbToHue(r, g, b) {
+        var rn = r / 255, gn = g / 255, bn = b / 255;
+        var max = Math.max(rn, gn, bn), min = Math.min(rn, gn, bn);
+        var d = max - min;
+        if (d === 0) return 0;
+        var h;
+        if (max === rn) h = ((gn - bn) / d) % 6;
+        else if (max === gn) h = (bn - rn) / d + 2;
+        else h = (rn - gn) / d + 4;
+        h *= 60;
+        return h < 0 ? h + 360 : h;
+    }
+
+    function hslToRgb(h, s, l) {
+        var c = (1 - Math.abs(2 * l - 1)) * s;
+        var x = c * (1 - Math.abs((h / 60) % 2 - 1));
+        var m = l - c / 2;
+        var r1 = 0, g1 = 0, b1 = 0;
+        if (h < 60) { r1 = c; g1 = x; }
+        else if (h < 120) { r1 = x; g1 = c; }
+        else if (h < 180) { g1 = c; b1 = x; }
+        else if (h < 240) { g1 = x; b1 = c; }
+        else if (h < 300) { r1 = x; b1 = c; }
+        else { r1 = c; b1 = x; }
+        return {
+            r: Math.round((r1 + m) * 255),
+            g: Math.round((g1 + m) * 255),
+            b: Math.round((b1 + m) * 255),
+            a: 1
+        };
+    }
+
+    function normalizeAccent(rgba) {
+        var hsl = rgbToHsl(rgba.r, rgba.g, rgba.b);
+        if (hsl.l >= 0.38) return { r: rgba.r, g: rgba.g, b: rgba.b, a: 1 };
+        var h = rgbToHue(rgba.r, rgba.g, rgba.b);
+        return hslToRgb(h, Math.max(hsl.s, 0.72), 0.46);
+    }
+
+    function saveMainThemeAccent(col) {
+        if (!col) return col;
+        lastMainThemeAccent = col;
+        try {
+            localStorage.setItem('wa_last_theme_accent', JSON.stringify(col));
+        } catch (e) {}
+        return col;
+    }
+
+    function probeMainChatThemeAccent() {
+        var mainEl = document.getElementById('main');
+        if (!mainEl) return lastMainThemeAccent;
+        var d, cs, col;
+
+        var mainRect = mainEl.getBoundingClientRect();
+        if (mainRect.width > 0) {
+            var midThreshold = mainRect.left + mainRect.width * 0.52;
+            var leftMin = mainRect.left + 20;
+            var maxBubbleW = mainRect.width * 0.88;
+
+            // 1. Priorizar burbujas reales de mensaje saliente (.message-out o [data-id^="true_"])
+            var outRoots = mainEl.querySelectorAll('[data-id^="true_"], .message-out');
+            var colorCounts = {};
+            var colorSamples = {};
+            var colorDistinctNodes = {};
+            var bestKey = null;
+            var bestScore = 0;
+
+            function recordCandidateColor(c, weight, elRef) {
+                var key = Math.round(c.r / 4) + ',' + Math.round(c.g / 4) + ',' + Math.round(c.b / 4);
+                colorCounts[key] = (colorCounts[key] || 0) + weight;
+                if (!colorSamples[key]) colorSamples[key] = c;
+                if (!colorDistinctNodes[key]) colorDistinctNodes[key] = [];
+                if (elRef && colorDistinctNodes[key].indexOf(elRef) === -1) {
+                    colorDistinctNodes[key].push(elRef);
+                }
+                if (colorCounts[key] > bestScore) {
+                    bestScore = colorCounts[key];
+                    bestKey = key;
+                }
+            }
+
+            if (outRoots.length > 0) {
+                for (var or = outRoots.length - 1; or >= 0 && or >= outRoots.length - 12; or--) {
+                    var rootEl = outRoots[or];
+                    var subNodes = rootEl.querySelectorAll('div, span');
+                    for (var s = 0; s < subNodes.length && s < 60; s++) {
+                        var sub = subNodes[s];
+                        if (sub.querySelector('img, video, canvas, svg') && sub.getBoundingClientRect().width < 44) continue;
+                        var sr = sub.getBoundingClientRect();
+                        if (sr.right <= midThreshold || sr.left <= leftMin) continue;
+                        if (sr.width < 32 || sr.width > maxBubbleW || sr.height < 18 || sr.height > 360) continue;
+                        cs = window.getComputedStyle(sub);
+                        col = parseCssColor(cs.backgroundColor);
+                        if (isValidAccentColor(col)) {
+                            recordCandidateColor(col, Math.min(4, Math.max(1, Math.round((sr.width * sr.height) / 1500))), rootEl);
+                        } else if (sr.width >= 140 && Math.abs(sr.width - sr.height) <= 24) {
+                            col = parseCssColor(cs.borderTopColor);
+                            if (isValidAccentColor(col)) {
+                                recordCandidateColor(col, 3, rootEl);
+                            }
+                        }
+                    }
+                }
+                if (bestKey && colorSamples[bestKey]) {
+                    return saveMainThemeAccent(colorSamples[bestKey]);
+                }
+            }
+
+            // 2. Fallback: evaluar color modal/mayoritario en contenedores de burbuja de la mitad derecha
+            var nodes = mainEl.querySelectorAll('div, span');
+            var checked = 0;
+            for (d = nodes.length - 1; d >= 0 && checked < 450; d--) {
+                var el = nodes[d];
+                if (el.closest('header, footer, [role="dialog"], [role="menu"], [data-animate-picker]')) continue;
+                if (el.getAttribute('role') === 'button' && el.getBoundingClientRect().height < 30) continue;
+                var r = el.getBoundingClientRect();
+                if (r.right <= midThreshold || r.left <= leftMin) continue;
+                if (r.width < 34 || r.width > maxBubbleW || r.height < 20 || r.height > 350) continue;
+                checked++;
+                cs = window.getComputedStyle(el);
+                col = parseCssColor(cs.backgroundColor);
+                var bubbleGroup = el.closest('[role="row"], [data-id]') || el;
+                if (isValidAccentColor(col)) {
+                    recordCandidateColor(col, Math.min(3, Math.max(1, Math.round((r.width * r.height) / 1800))), bubbleGroup);
+                } else if (r.width >= 140 && Math.abs(r.width - r.height) <= 24) {
+                    col = parseCssColor(cs.borderTopColor);
+                    if (isValidAccentColor(col)) {
+                        recordCandidateColor(col, 2, bubbleGroup);
+                    }
+                }
+            }
+            var distinctCount = (bestKey && colorDistinctNodes[bestKey]) ? colorDistinctNodes[bestKey].length : 0;
+            if (bestKey && bestScore >= 3 && distinctCount >= 2 && colorSamples[bestKey]) {
+                return saveMainThemeAccent(colorSamples[bestKey]);
+            }
+        }
+
+        return lastMainThemeAccent;
+    }
+
+    function probeAccentFromDom() {
+        var probe = ensureAccentProbe();
+        var mainCol = probeMainChatThemeAccent(probe);
+        if (mainCol) return mainCol;
+
+        var cs, col, i;
+        var mainEl = document.getElementById('main');
+        if (mainEl) {
+            var btns = mainEl.querySelectorAll('footer button, footer [role="button"], footer span[data-icon]');
+            for (i = 0; i < btns.length && i < 30; i++) {
+                cs = window.getComputedStyle(btns[i]);
+                col = parseCssColor(cs.backgroundColor);
+                if (isValidAccentColor(col)) return col;
+            }
+        }
+        var pane = document.getElementById('pane-side');
+        if (pane) {
+            var labeled = pane.querySelectorAll('span[aria-label*="no le" i], span[aria-label*="unread" i]');
+            for (i = 0; i < labeled.length && i < 8; i++) {
+                var cands = [labeled[i], labeled[i].parentElement];
+                for (var c = 0; c < cands.length; c++) {
+                    if (!cands[c]) continue;
+                    col = parseCssColor(window.getComputedStyle(cands[c]).backgroundColor);
+                    if (isValidAccentColor(col)) return col;
+                }
+            }
+            var smalls = pane.querySelectorAll('span, div');
+            var checked = 0;
+            for (i = 0; i < smalls.length && checked < 400; i++) {
+                var sm = smalls[i];
+                var txt = sm.textContent;
+                if (!txt || txt.length > 4 || !/^\d+$/.test(txt.trim())) continue;
+                checked++;
+                var sr = sm.getBoundingClientRect();
+                if (sr.width < 16 || sr.width > 42 || sr.height < 16 || sr.height > 28) continue;
+                cs = window.getComputedStyle(sm);
+                if (parseFloat(cs.borderTopLeftRadius) < 8) continue;
+                col = parseCssColor(cs.backgroundColor);
+                if (isValidAccentColor(col)) return col;
+            }
+        }
+        return null;
+    }
+
+    function computeAccentFg(rgba) {
+        function toLin(c) {
+            var v = c / 255;
+            return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
+        }
+        var lum = 0.2126 * toLin(rgba.r) + 0.7152 * toLin(rgba.g) + 0.0722 * toLin(rgba.b);
+        return lum > 0.45 ? '#111b21' : '#ffffff';
+    }
+
+    function resolveNativeBadgeFg() {
+        var scopes = [
+            document.querySelector('[data-wa-nav-rail="true"]') || document.querySelector('#app header'),
+            document.getElementById('pane-side') || document.getElementById('side')
+        ];
+        for (var s = 0; s < scopes.length; s++) {
+            var root = scopes[s];
+            if (!root) continue;
+            var badges = root.querySelectorAll('span[aria-label*="no le" i], span[aria-label*="unread" i], [data-wa-accent-bg="true"]');
+            for (var i = 0; i < badges.length; i++) {
+                var b = badges[i];
+                if (!b || (b.classList && b.classList.contains('wa-alt-badge'))) continue;
+                var leaf = b;
+                var innerSpans = b.querySelectorAll('span, div');
+                for (var j = 0; j < innerSpans.length; j++) {
+                    var sp = innerSpans[j];
+                    if (sp.children.length === 0 && /^\d+$/.test((sp.textContent || '').trim())) {
+                        leaf = sp;
+                        break;
+                    }
+                }
+                if (leaf.children.length === 0 && /^\d+$/.test((leaf.textContent || '').trim())) {
+                    var br = leaf.getBoundingClientRect();
+                    if (br.width > 0 && br.height > 0) {
+                        var cs = window.getComputedStyle(leaf);
+                        var col = parseCssColor(cs.color);
+                        if (col && col.a > 0.5) {
+                            return 'rgb(' + col.r + ', ' + col.g + ', ' + col.b + ')';
+                        }
+                    }
+                }
+            }
+        }
+        var varTargets = [document.querySelector('#app > div'), document.body, document.documentElement];
+        var varNames = ['--unread-marker-text', '--WDS-content-on-accent'];
+        for (var vt = 0; vt < varTargets.length; vt++) {
+            var t = varTargets[vt];
+            if (!t) continue;
+            var tCs = window.getComputedStyle(t);
+            for (var vn = 0; vn < varNames.length; vn++) {
+                var raw = (tCs.getPropertyValue(varNames[vn]) || '').trim();
+                if (raw) {
+                    var parsed = parseCssColor(raw);
+                    if (parsed && parsed.a > 0.5) {
+                        return 'rgb(' + parsed.r + ', ' + parsed.g + ', ' + parsed.b + ')';
+                    }
+                }
+            }
+        }
+        if (document.body) {
+            if (document.body.classList.contains('dark')) return '#111b21';
+            var bgCol = parseCssColor(window.getComputedStyle(document.body).backgroundColor);
+            if (bgCol && bgCol.a > 0.2) {
+                var bgLum = (0.299 * bgCol.r + 0.587 * bgCol.g + 0.114 * bgCol.b) / 255;
+                return bgLum < 0.5 ? '#111b21' : '#ffffff';
+            }
+        }
+        return '#111b21';
+    }
+
+    function ensureAccentProbe() {
+        if (!document.body) return null;
+        if (accentProbeEl && accentProbeEl.isConnected) return accentProbeEl;
+        accentProbeEl = document.getElementById('wa-accent-probe');
+        if (!accentProbeEl) {
+            accentProbeEl = document.createElement('span');
+            accentProbeEl.id = 'wa-accent-probe';
+            accentProbeEl.style.cssText = 'position:fixed;left:-9999px;top:-9999px;width:0;height:0;pointer-events:none;visibility:hidden;';
+            document.body.appendChild(accentProbeEl);
+        }
+        return accentProbeEl;
+    }
+
+    function resolveCssVarColor(rawVal, styleObj, probe) {
+        if (!rawVal) return null;
+        var current = rawVal.trim();
+        for (var depth = 0; depth < 5; depth++) {
+            var varMatch = current.match(/^var\(\s*(--[a-zA-Z0-9_-]+)(?:\s*,\s*([^)]+))?\s*\)$/);
+            if (!varMatch) break;
+            var nextVal = styleObj ? styleObj.getPropertyValue(varMatch[1]).trim() : '';
+            if (nextVal) {
+                current = nextVal;
+            } else if (varMatch[2]) {
+                current = varMatch[2].trim();
+            } else {
+                return null;
+            }
+        }
+        var direct = parseCssColor(current);
+        if (direct) return direct;
+        if (probe) {
+            probe.style.color = '';
+            probe.style.color = current;
+            if (probe.style.color) {
+                return parseCssColor(window.getComputedStyle(probe).color);
+            }
+        }
+        return null;
+    }
+
+    function detectDynamicAccent() {
+        // 1. Sondeo directo de elementos reales en #main (burbujas/pildoras del tema activo) y #pane-side
+        var domCol = probeAccentFromDom();
+        if (domCol) return domCol;
+
+        var probe = ensureAccentProbe();
+
+        // 2. Scan inline CSS custom properties on #main / #app > div / body / html
+        var inlineRoots = [
+            document.querySelector('#main > div'),
+            document.querySelector('#main'),
+            document.querySelector('#app > div'),
+            document.body,
+            document.documentElement
+        ];
+        for (var ir = 0; ir < inlineRoots.length; ir++) {
+            var iEl = inlineRoots[ir];
+            if (!iEl || !iEl.style || !iEl.style.length) continue;
+            var iCs = window.getComputedStyle(iEl);
+            for (var sp = 0; sp < iEl.style.length; sp++) {
+                var propName = iEl.style[sp];
+                if (!propName || propName.indexOf('--') !== 0) continue;
+                if (propName.indexOf('--wa-dynamic-') === 0) continue;
+                if (/(accent|theme|unread|outgoing|brand|primary)/i.test(propName)) {
+                    var iVal = iCs.getPropertyValue(propName);
+                    var iCol = resolveCssVarColor(iVal, iCs, probe);
+                    if (isValidAccentColor(iCol)) {
+                        return iCol;
+                    }
+                }
+            }
+        }
+
+        // 3. Probe rendered elements (unread badges, send/ptt button, outgoing bubbles, active nav)
+        var elementProbes = [
+            { sel: '#pane-side [data-testid="icon-unread-count"], #pane-side [data-icon="unread-count"]', props: ['backgroundColor'], checkParent: true },
+            { sel: '#pane-side span[aria-label*="no le" i], #pane-side span[aria-label*="unread" i]', props: ['backgroundColor'], checkParent: true },
+            { sel: '#main [data-testid="compose-btn-send"], #main button[data-testid="send"], #main [data-icon="send"], #main [data-icon="wds-ic-send-filled"]', props: ['backgroundColor', 'color'], checkParent: true },
+            { sel: '#main [data-testid="ptt-btn"], #main [data-icon="ptt"], #main [data-icon="mic"], #main [data-icon="wds-ic-mic-filled"]', props: ['backgroundColor', 'color'], checkParent: true },
+            { sel: '#main .message-out div, #main div[data-id^="true_"] div, #main .message-out [data-testid="msg-container"]', props: ['backgroundColor'], checkParent: false },
+            { sel: '[data-wa-nav-rail="true"] [aria-pressed="true"], [data-wa-nav-rail="true"] [aria-selected="true"]', props: ['color', 'backgroundColor'], checkParent: false },
+            { sel: '#side [role="tablist"] [aria-selected="true"], #side [role="tab"][aria-selected="true"]', props: ['backgroundColor', 'color'], checkParent: false }
+        ];
+        for (var e = 0; e < elementProbes.length; e++) {
+            var spec = elementProbes[e];
+            var nodes = document.querySelectorAll(spec.sel);
+            for (var n = 0; n < nodes.length && n < 5; n++) {
+                var el = nodes[n];
+                var targetList = spec.checkParent && el.parentElement ? [el, el.parentElement] : [el];
+                for (var t = 0; t < targetList.length; t++) {
+                    var cs = window.getComputedStyle(targetList[t]);
+                    for (var p = 0; p < spec.props.length; p++) {
+                        var parsed = parseCssColor(cs[spec.props[p]]);
+                        if (isValidAccentColor(parsed)) {
+                            return parsed;
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Check #main theme vars first, then global root candidates
+        var rootCandidates = [];
+        var mainEl = document.querySelector('#main');
+        if (mainEl) rootCandidates.push(mainEl);
+        var appChild = document.querySelector('#app > div');
+        if (appChild) rootCandidates.push(appChild);
+        if (document.body) rootCandidates.push(document.body);
+        if (document.documentElement) rootCandidates.push(document.documentElement);
+
+        var rootStyles = [];
+        for (var r = 0; r < rootCandidates.length; r++) {
+            rootStyles.push(window.getComputedStyle(rootCandidates[r]));
+        }
+
+        var primaryVars = [
+            '--WDS-accent',
+            '--WDS-systems-accent',
+            '--WDS-persistent-activity-indicator',
+            '--WDS-content-action-default',
+            '--accent-primary',
+            '--unread-marker-background',
+            '--button-primary-background'
+        ];
+        for (var i = 0; i < primaryVars.length; i++) {
+            for (var s = 0; s < rootStyles.length; s++) {
+                var val = rootStyles[s].getPropertyValue(primaryVars[i]);
+                var col = resolveCssVarColor(val, rootStyles[s], probe);
+                if (isValidAccentColor(col)) {
+                    return col;
+                }
+            }
+        }
+
+        var fallbackVars = [
+            '--teal',
+            '--teal-light',
+            '--active-tab-marker',
+            '--ptt-green',
+            '--switch-button-checked-color'
+        ];
+        for (var f = 0; f < fallbackVars.length; f++) {
+            for (var rs = 0; rs < rootStyles.length; rs++) {
+                var fVal = rootStyles[rs].getPropertyValue(fallbackVars[f]);
+                var fCol = resolveCssVarColor(fVal, rootStyles[rs], probe);
+                if (isValidAccentColor(fCol)) {
+                    return fCol;
+                }
+            }
+        }
+
+        return { r: 0, g: 168, b: 132, a: 1 };
+    }
+
+    function isWhatsAppGreenColor(rgba, minAlpha) {
+        var alphaThreshold = (typeof minAlpha === 'number') ? minAlpha : 0.25;
+        if (!rgba || rgba.a < alphaThreshold) return false;
+        if (rgba.g <= rgba.r + 6 || rgba.g < rgba.b) return false;
+        var h = rgbToHue(rgba.r, rgba.g, rgba.b);
+        var hsl = rgbToHsl(rgba.r, rgba.g, rgba.b);
+        return h >= 88 && h <= 178 && hsl.s >= 0.18;
+    }
+
+    function deriveAccentPalette(col) {
+        var hsl = rgbToHsl(col.r, col.g, col.b);
+        var h = rgbToHue(col.r, col.g, col.b);
+        var s = Math.max(0.45, Math.min(0.85, hsl.s || 0.65));
+        var lightRgb = hslToRgb(h, Math.min(0.90, s * 1.05), 0.88);
+        var darkRgb = hslToRgb(h, Math.min(0.75, s * 0.90), 0.17);
+        var borderRgb = hslToRgb(h, Math.min(0.80, s), 0.32);
+        return {
+            light: 'rgb(' + lightRgb.r + ', ' + lightRgb.g + ', ' + lightRgb.b + ')',
+            lightRgbStr: lightRgb.r + ', ' + lightRgb.g + ', ' + lightRgb.b,
+            dark: 'rgb(' + darkRgb.r + ', ' + darkRgb.g + ', ' + darkRgb.b + ')',
+            darkRgbStr: darkRgb.r + ', ' + darkRgb.g + ', ' + darkRgb.b,
+            border: 'rgb(' + borderRgb.r + ', ' + borderRgb.g + ', ' + borderRgb.b + ')',
+            borderRgbStr: borderRgb.r + ', ' + borderRgb.g + ', ' + borderRgb.b
+        };
+    }
+
+    var discoveredWdsVarRuleText = '';
+    var wdsCandidateVarNames = null;
+
+    function collectWdsCandidateVarNames() {
+        if (wdsCandidateVarNames && wdsCandidateVarNames.length > 50) return wdsCandidateVarNames;
+        var seen = {};
+        var names = [
+            '--WDS-accent', '--WDS-accent-RGB', '--WDS-systems-accent', '--WDS-systems-accent-RGB',
+            '--WDS-persistent-activity-indicator', '--WDS-persistent-activity-indicator-RGB',
+            '--unread-marker-background', '--unread-marker-background-rgb',
+            '--button-primary-background', '--button-primary-background-rgb',
+            '--active-tab-marker', '--active-tab-marker-rgb',
+            '--teal', '--teal-rgb', '--teal-light', '--teal-light-rgb',
+            '--ptt-green', '--ptt-green-rgb', '--highlight', '--highlight-rgb',
+            '--mention-at-text', '--incoming-background-highlight', '--outgoing-background-highlight',
+            '--checkbox-background', '--progress-primary', '--spinner-highlight', '-- typing', '--typing-rgb'
+        ];
+        for (var n = 0; n < names.length; n++) {
+            seen[names[n]] = true;
+        }
+        try {
+            var sheets = document.styleSheets;
+            for (var s = 0; s < sheets.length; s++) {
+                var rules;
+                try {
+                    rules = sheets[s].cssRules;
+                } catch (e) {
+                    continue;
+                }
+                if (!rules) continue;
+                for (var r = 0; r < rules.length; r++) {
+                    var rule = rules[r];
+                    var st = rule && rule.style;
+                    if (!st) continue;
+                    var sel = rule.selectorText || '';
+                    if (sel.indexOf(':root') === -1 && sel.indexOf('body') === -1 && sel.indexOf('dark') === -1 && sel.indexOf('theme') === -1 && sel.indexOf('#app') === -1) {
+                        continue;
+                    }
+                    for (var p = 0; p < st.length; p++) {
+                        var prop = st[p];
+                        if (prop && prop.indexOf('--') === 0 && prop.indexOf('--wa-') !== 0 && !seen[prop]) {
+                            seen[prop] = true;
+                            names.push(prop);
+                        }
+                    }
+                }
+            }
+        } catch (err) {
+            // Ignorar hojas inaccesibles
+        }
+        wdsCandidateVarNames = names;
+        return names;
+    }
+
+    function syncDynamicWdsCssVars() {
+        var styleEl = document.getElementById('wa-dynamic-wds-overrides');
+        if (styleEl) {
+            styleEl.disabled = true;
+        }
+        var varNames = collectWdsCandidateVarNames();
+        var targets = [document.documentElement, document.body, document.querySelector('#app > div')];
+        var declarations = [];
+        var mapped = {};
+
+        for (var t = 0; t < targets.length; t++) {
+            var el = targets[t];
+            if (!el) continue;
+            var cs = window.getComputedStyle(el);
+            for (var i = 0; i < varNames.length; i++) {
+                var name = varNames[i];
+                if (mapped[name]) continue;
+                var val = (cs.getPropertyValue(name) || '').trim();
+                if (!val) continue;
+
+                var tripletMatch = val.match(/^\s*(\d{1,3})\s*,\s*(\d{1,3})\s*,\s*(\d{1,3})\s*$/);
+                if (tripletMatch) {
+                    var tr = {
+                        r: parseInt(tripletMatch[1], 10),
+                        g: parseInt(tripletMatch[2], 10),
+                        b: parseInt(tripletMatch[3], 10),
+                        a: 1
+                    };
+                    if (isWhatsAppGreenColor(tr, 0.08)) {
+                        var trHsl = rgbToHsl(tr.r, tr.g, tr.b);
+                        var rgbTarget = '--wa-dynamic-accent-rgb';
+                        if (trHsl.l >= 0.72) {
+                            rgbTarget = '--wa-dynamic-accent-light-rgb';
+                        } else if (trHsl.l <= 0.26) {
+                            rgbTarget = '--wa-dynamic-accent-dark-rgb';
+                        }
+                        declarations.push(name + ': var(' + rgbTarget + ') !important;');
+                        mapped[name] = true;
+                    }
+                    continue;
+                }
+
+                var col = parseCssColor(val);
+                if (col && isWhatsAppGreenColor(col, 0.08)) {
+                    var cHsl = rgbToHsl(col.r, col.g, col.b);
+                    if (col.a < 0.98) {
+                        var aStr = (Math.round(col.a * 1000) / 1000).toString();
+                        var alphaRgbVar = cHsl.l >= 0.72 ? '--wa-dynamic-accent-light-rgb' : (cHsl.l <= 0.26 ? '--wa-dynamic-accent-dark-rgb' : '--wa-dynamic-accent-rgb');
+                        declarations.push(name + ': rgba(var(' + alphaRgbVar + '), ' + aStr + ') !important;');
+                    } else if (cHsl.l >= 0.72) {
+                        declarations.push(name + ': var(--wa-dynamic-accent-light) !important;');
+                    } else if (cHsl.l <= 0.26) {
+                        declarations.push(name + ': var(--wa-dynamic-accent-dark) !important;');
+                    } else {
+                        declarations.push(name + ': var(--wa-dynamic-accent) !important;');
+                    }
+                    mapped[name] = true;
+                }
+            }
+        }
+
+        if (styleEl) {
+            styleEl.disabled = false;
+        }
+        if (declarations.length === 0) return;
+
+        var ruleText = ':root, body, #app, #app > div {\n    ' + declarations.join('\n    ') + '\n}';
+        if (!styleEl) {
+            styleEl = document.createElement('style');
+            styleEl.id = 'wa-dynamic-wds-overrides';
+            (document.head || document.documentElement).appendChild(styleEl);
+        }
+        if (ruleText !== discoveredWdsVarRuleText) {
+            discoveredWdsVarRuleText = ruleText;
+            styleEl.textContent = ruleText;
+        }
+    }
+
+    function tagSingleWhatsAppGreenElement(el) {
+        if (!el || el.nodeType !== 1) return;
+        if (el.classList && el.classList.contains('wa-alt-badge')) return;
+        var tag = el.tagName ? el.tagName.toLowerCase() : '';
+        var isIconOrSvg = (tag === 'svg' || el.hasAttribute('data-icon'));
+        var cs = window.getComputedStyle(el);
+
+        if (isIconOrSvg) {
+            if (!el.hasAttribute('data-wa-accent-icon')) {
+                var iconFg = parseCssColor(cs.color);
+                var iconFill = parseCssColor(cs.fill);
+                if (isWhatsAppGreenColor(iconFg, 0.12) || isWhatsAppGreenColor(iconFill, 0.12)) {
+                    el.setAttribute('data-wa-accent-icon', 'true');
+                } else if (tag !== 'svg') {
+                    var childPath = el.querySelector('svg, path');
+                    if (childPath) {
+                        var cpCs = window.getComputedStyle(childPath);
+                        if (isWhatsAppGreenColor(parseCssColor(cpCs.fill), 0.12) || isWhatsAppGreenColor(parseCssColor(cpCs.color), 0.12)) {
+                            el.setAttribute('data-wa-accent-icon', 'true');
+                        } else if (isWhatsAppGreenColor(parseCssColor(cpCs.stroke), 0.12)) {
+                            el.setAttribute('data-wa-accent-stroke', 'true');
+                        }
+                    }
+                }
+            }
+            if (!el.hasAttribute('data-wa-accent-stroke')) {
+                var iconStroke = parseCssColor(cs.stroke);
+                if (isWhatsAppGreenColor(iconStroke, 0.12)) {
+                    el.setAttribute('data-wa-accent-stroke', 'true');
+                }
+            }
+            return;
+        }
+
+        if (!el.hasAttribute('data-wa-accent-bg') && !el.hasAttribute('data-wa-accent-bg-light') && !el.hasAttribute('data-wa-accent-pill')) {
+            var bg = parseCssColor(cs.backgroundColor);
+            if (isWhatsAppGreenColor(bg, 0.12)) {
+                var hsl = rgbToHsl(bg.r, bg.g, bg.b);
+                if (hsl.l < 0.28 || el.getAttribute('role') === 'tab' || el.closest('[role="tablist"]')) {
+                    el.setAttribute('data-wa-accent-pill', 'true');
+                } else if (hsl.l >= 0.72) {
+                    el.setAttribute('data-wa-accent-bg-light', 'true');
+                } else {
+                    el.setAttribute('data-wa-accent-bg', 'true');
+                }
+            }
+        }
+        if (!el.hasAttribute('data-wa-accent-border')) {
+            var bc = parseCssColor(cs.borderTopColor || cs.borderColor);
+            if (isWhatsAppGreenColor(bc, 0.12)) {
+                el.setAttribute('data-wa-accent-border', 'true');
+            }
+        }
+        if (!el.hasAttribute('data-wa-accent-fg') && !el.hasAttribute('data-wa-accent-fg-light') &&
+            !el.hasAttribute('data-wa-accent-fg-dark') && !el.hasAttribute('data-wa-accent-bg') &&
+            (el.children.length === 0 || el.getAttribute('role') === 'tab' || el.closest('[role="tablist"]')) &&
+            (el.textContent || '').trim().length > 0) {
+            var fg = parseCssColor(cs.color);
+            if (isWhatsAppGreenColor(fg, 0.12)) {
+                var fgHsl = rgbToHsl(fg.r, fg.g, fg.b);
+                if (fgHsl.l >= 0.68 || el.hasAttribute('data-wa-accent-pill') || el.closest('[data-wa-accent-pill="true"]')) {
+                    el.setAttribute('data-wa-accent-fg-light', 'true');
+                } else if (fgHsl.l <= 0.34) {
+                    el.setAttribute('data-wa-accent-fg-dark', 'true');
+                } else {
+                    el.setAttribute('data-wa-accent-fg', 'true');
+                }
+            }
+        }
+    }
+
+    function tagWhatsAppGreenSubtree(rootNode, maxLimit) {
+        if (!rootNode || rootNode.nodeType !== 1) return;
+        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+        var oldPills = rootNode.querySelectorAll ? rootNode.querySelectorAll('[data-wa-accent-pill="true"]') : [];
+        for (var op = 0; op < oldPills.length; op++) {
+            var pill = oldPills[op];
+            if (pill.getAttribute('aria-selected') === 'false' || pill.getAttribute('aria-pressed') === 'false') {
+                pill.removeAttribute('data-wa-accent-pill');
+                pill.removeAttribute('data-wa-accent-fg-light');
+                pill.removeAttribute('data-wa-accent-border');
+            }
+        }
+        tagSingleWhatsAppGreenElement(rootNode);
+        if (!rootNode.querySelectorAll) return;
+        var limit = maxLimit || 2800;
+        var nodes = rootNode.querySelectorAll('span, div, button, [role="button"], [role="tab"], svg, [data-icon]');
+        for (var i = 0; i < nodes.length && i < limit; i++) {
+            tagSingleWhatsAppGreenElement(nodes[i]);
+        }
+    }
+
+    function tagWhatsAppGreenAccents() {
+        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+        var roots = [
+            document.querySelector('[data-wa-nav-rail="true"]') || document.querySelector('#app header'),
+            document.getElementById('side') || document.querySelector('[data-wa-side-column="true"]'),
+            document.querySelector('[data-wa-tab-side-column="true"]'),
+            document.querySelector('[data-wa-left-drawer="true"]')
+        ];
+        for (var r = 0; r < roots.length; r++) {
+            if (roots[r]) {
+                tagWhatsAppGreenSubtree(roots[r], 2800);
+            }
+        }
+    }
+
+    function syncThemePalette(forceWhenAlt) {
+        if (!forceWhenAlt && window.__waAltKeyDown === true) return;
+        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+        var col = normalizeAccent(detectDynamicAccent());
+        var cssAccent = 'rgb(' + col.r + ', ' + col.g + ', ' + col.b + ')';
+        var cssAccentRgb = col.r + ', ' + col.g + ', ' + col.b;
+        var cssTint = 'rgba(' + col.r + ', ' + col.g + ', ' + col.b + ', 0.22)';
+        var palette = deriveAccentPalette(col);
+        var cssFg = resolveNativeBadgeFg();
+        if (cssAccent !== lastAppliedAccent) {
+            lastAppliedAccent = cssAccent;
+            window.__waAppliedDynamicAccent = cssAccent;
+            document.documentElement.style.setProperty('--wa-dynamic-accent', cssAccent);
+            document.documentElement.style.setProperty('--wa-dynamic-accent-rgb', cssAccentRgb);
+            document.documentElement.style.setProperty('--wa-dynamic-accent-tint', cssTint);
+            document.documentElement.style.setProperty('--wa-dynamic-accent-light', palette.light);
+            document.documentElement.style.setProperty('--wa-dynamic-accent-light-rgb', palette.lightRgbStr);
+            document.documentElement.style.setProperty('--wa-dynamic-accent-dark', palette.dark);
+            document.documentElement.style.setProperty('--wa-dynamic-accent-dark-rgb', palette.darkRgbStr);
+            document.documentElement.style.setProperty('--wa-dynamic-accent-border', palette.border);
+            document.documentElement.style.setProperty('--wa-dynamic-accent-border-rgb', palette.borderRgbStr);
+        }
+        if (cssFg !== lastAppliedAccentFg) {
+            lastAppliedAccentFg = cssFg;
+            document.documentElement.style.setProperty('--wa-dynamic-accent-fg', cssFg);
+        }
+        if (!discoveredWdsVarRuleText && document.querySelector('#app > div')) {
+            syncDynamicWdsCssVars();
+        }
+    }
+
+    function syncDynamicAccent() {
+        syncThemePalette(false);
+        tagWhatsAppGreenAccents();
+    }
+
+    window.__waDetectAndApplyAccent = function() {
+        syncThemePalette(false);
+        tagWhatsAppGreenAccents();
+        return {
+            accent: lastAppliedAccent,
+            fg: lastAppliedAccentFg
+        };
+    };
+
+    var paletteSyncTimer = null;
+
+    function scheduleAccentSync(immediate) {
+        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+        if (immediate) {
+            if (accentSyncTimer) {
+                clearTimeout(accentSyncTimer);
+                accentSyncTimer = null;
+            }
+            syncThemePalette(false);
+            tagWhatsAppGreenAccents();
+            return;
+        }
+        if (!paletteSyncTimer && window.__waAltKeyDown !== true) {
+            paletteSyncTimer = setTimeout(function() {
+                paletteSyncTimer = null;
+                if (window.__waAltKeyDown !== true) {
+                    syncThemePalette(false);
+                }
+            }, 350);
+        }
+        if (accentSyncTimer) return;
+        accentSyncTimer = setTimeout(function() {
+            accentSyncTimer = null;
+            tagWhatsAppGreenAccents();
+        }, 220);
+    }
+
+    function isElementVisible(el) {
+        if (!el || !el.isConnected) return false;
+        var rect = el.getBoundingClientRect();
+        if (rect.width <= 0 || rect.height <= 0) return false;
+        var cs = window.getComputedStyle(el);
+        if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) <= 0) {
+            return false;
+        }
+        if (cs.pointerEvents === 'none') {
+            return false;
+        }
+        if (el.children.length === 0 && (!el.textContent || !el.textContent.trim())) {
+            var bg = cs.backgroundColor;
+            if ((!bg || bg === 'transparent' || bg === 'rgba(0, 0, 0, 0)') && cs.backgroundImage === 'none') {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    function rectsIntersect(a, b, pad) {
+        var p = pad || 0;
+        return a.left - p <= b.right &&
+               a.right + p >= b.left &&
+               a.top - p <= b.bottom &&
+               a.bottom + p >= b.top;
+    }
+
+    function isLayoutColumnOrAncestor(el, sideEl, mainEl) {
+        if (!el) return true;
+        if (el === document.documentElement || el === document.body || el.id === 'app' || el.id === 'wa-compact-hover-tooltip') {
+            return true;
+        }
+        if ((el.classList && el.classList.contains('app-wrapper-web')) || el.hasAttribute('data-wa-flex-container')) {
+            return true;
+        }
+        if ((sideEl && el.contains(sideEl)) || (mainEl && el.contains(mainEl))) {
+            return true;
+        }
+        return !!(el.closest('#side, [data-wa-side-column="true"], #main, [data-wa-main-column="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"], [data-wa-left-drawer="true"], [data-wa-right-column="true"], [data-wa-nav-rail="true"]'));
+    }
+
+    function isPointCoveredByOverlay(resizerEl, testX, testY) {
+        if (typeof document.elementsFromPoint !== 'function') return false;
+        var x = Math.max(1, Math.min(window.innerWidth - 2, Math.round(testX)));
+        var y = Math.max(1, Math.min(window.innerHeight - 2, Math.round(testY)));
+        var stack = document.elementsFromPoint(x, y);
+        if (!stack || !stack.length) return false;
+
+        var resizerIdx = stack.indexOf(resizerEl);
+        var sideEl = document.getElementById('side');
+        var mainEl = document.getElementById('main');
+
+        for (var i = 0; i < stack.length; i++) {
+            var el = stack[i];
+            if (el === resizerEl || el === resizerElement || el === rightResizerElement) continue;
+            if (el === document.documentElement || el === document.body || el.id === 'app' || el.id === 'wa-compact-hover-tooltip') {
+                continue;
+            }
+            if ((el.classList && el.classList.contains('app-wrapper-web')) || el.hasAttribute('data-wa-flex-container')) {
+                continue;
+            }
+            var explicitOverlay = el.matches(OVERLAY_CHECK_SELECTOR) ? el : el.closest(OVERLAY_CHECK_SELECTOR);
+            if (explicitOverlay && !explicitOverlay.closest('[data-wa-right-column="true"], [data-wa-left-drawer="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]') && isElementVisible(explicitOverlay)) {
+                return true;
+            }
+            if (resizerIdx > 0 && i < resizerIdx && isElementVisible(el)) {
+                return true;
+            }
+            if (!isLayoutColumnOrAncestor(el, sideEl, mainEl) && isElementVisible(el)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function isOpaqueColor(bg) {
+        var c = parseCssColor(bg);
+        return !!(c && c.a > 0.5);
+    }
+
+    var pickerOpeningUntil = 0;
+
+    function isPopupCandidatePresent(el) {
+        if (!el || !el.isConnected) return false;
+        var cs = window.getComputedStyle(el);
+        return cs.display !== 'none' && cs.visibility !== 'hidden';
+    }
+
+    function computeUnscaledHorizontalBounds(host, rect, prevDx) {
+        var boxW = host.offsetWidth || Math.round(rect.width);
+        if (boxW <= 0) return null;
+        var cs = window.getComputedStyle(host);
+        var tr = cs.transform;
+        var scaleX = 1;
+        var tx = 0;
+        var hasMatrix = false;
+
+        if (tr && tr !== 'none') {
+            if (typeof window.DOMMatrixReadOnly === 'function') {
+                try {
+                    var dm = new window.DOMMatrixReadOnly(tr);
+                    scaleX = dm.a || dm.m11 || 1;
+                    tx = dm.m41 || 0;
+                    hasMatrix = true;
+                } catch (err) {
+                    hasMatrix = false;
+                }
+            }
+            if (!hasMatrix) {
+                var m2d = tr.match(/matrix\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)/);
+                if (m2d) {
+                    scaleX = parseFloat(m2d[1]) || 1;
+                    tx = parseFloat(m2d[5]) || 0;
+                    hasMatrix = true;
+                } else {
+                    var m3d = tr.match(/matrix3d\(([^)]+)\)/);
+                    if (m3d) {
+                        var parts = m3d[1].split(',');
+                        if (parts.length >= 16) {
+                            scaleX = parseFloat(parts[0]) || 1;
+                            tx = parseFloat(parts[12]) || 0;
+                            hasMatrix = true;
+                        }
+                    }
+                }
+            }
+        }
+
+        var unscaledLeft;
+        if ((cs.position === 'fixed' || cs.position === 'absolute') && hasMatrix && Math.abs(scaleX - 1) <= 0.01 && host.offsetParent === document.body) {
+            unscaledLeft = (host.offsetLeft || 0) + tx;
+        } else if (Math.abs(scaleX - 1) > 0.01 && rect.width > 0) {
+            var center = (rect.left - prevDx) + rect.width / 2;
+            unscaledLeft = center - boxW / 2;
+        } else {
+            unscaledLeft = rect.left - prevDx;
+        }
+
+        return {
+            naturalLeft: unscaledLeft,
+            naturalRight: unscaledLeft + boxW,
+            width: boxW
+        };
+    }
+
+    function clampFloatingPickerViewport(host) {
+        if (!host || !host.isConnected) return;
+        var rect = host.getBoundingClientRect();
+        var offW = host.offsetWidth || Math.round(rect.width);
+        var offH = host.offsetHeight || Math.round(rect.height);
+        if (offW <= 0 || offH <= 0) return;
+
+        var vw = window.innerWidth;
+        var margin = 10;
+        var maxAllowedW = vw - 16;
+        var prevDx = parseFloat(host.getAttribute('data-wa-picker-dx') || '0') || 0;
+
+        if (offW > maxAllowedW || rect.width > maxAllowedW) {
+            host.style.setProperty('max-width', 'calc(100vw - 16px)', 'important');
+            host.style.setProperty('box-sizing', 'border-box', 'important');
+            host.style.setProperty('overflow-x', 'clip', 'important');
+            var innerWide = host.querySelectorAll(':scope > div, :scope > span, [data-animate-picker]');
+            for (var iw = 0; iw < innerWide.length; iw++) {
+                innerWide[iw].style.setProperty('max-width', '100%', 'important');
+                innerWide[iw].style.setProperty('box-sizing', 'border-box', 'important');
+            }
+            rect = host.getBoundingClientRect();
+            offW = host.offsetWidth || Math.round(rect.width);
+        }
+
+        var bounds = computeUnscaledHorizontalBounds(host, rect, prevDx);
+        if (!bounds) return;
+
+        var naturalLeft = bounds.naturalLeft;
+        var naturalRight = bounds.naturalRight;
+        var targetDx = 0;
+
+        if (naturalLeft < 8) {
+            targetDx = Math.round(margin - naturalLeft);
+        } else if (naturalRight > vw - 8) {
+            targetDx = Math.round((vw - margin) - naturalRight);
+        }
+
+        if (Math.abs(targetDx - prevDx) <= 1 && host.getAttribute('data-wa-picker-clamped') === 'true') {
+            return;
+        }
+
+        var cs = window.getComputedStyle(host);
+        if (cs.transitionProperty && (cs.transitionProperty.indexOf('all') !== -1 || cs.transitionProperty.indexOf('translate') !== -1)) {
+            host.style.setProperty('transition-property', 'opacity, transform', 'important');
+        }
+
+        if (targetDx !== 0) {
+            host.style.setProperty('translate', targetDx + 'px 0px', 'important');
+            host.setAttribute('data-wa-picker-dx', String(targetDx));
+            host.setAttribute('data-wa-picker-clamped', 'true');
+        } else if (host.getAttribute('data-wa-picker-clamped') === 'true') {
+            host.style.removeProperty('translate');
+            host.removeAttribute('data-wa-picker-dx');
+            host.removeAttribute('data-wa-picker-clamped');
+        }
+    }
+
+    function attachPopupHostStyleObserver(host) {
+        if (!host || host.nodeType !== 1 || host.__waPickerStyleObsAttached) return;
+        host.__waPickerStyleObsAttached = true;
+        var styleObs = new MutationObserver(function() {
+            if (!host.isConnected) {
+                styleObs.disconnect();
+                return;
+            }
+            clampFloatingPickerViewport(host);
+        });
+        styleObs.observe(host, { attributes: true, attributeFilter: ['style', 'class'] });
+        setTimeout(function() {
+            styleObs.disconnect();
+            host.__waPickerStyleObsAttached = false;
+        }, 360);
+    }
+
+    function resolveFloatingPopupHost(el, mainEl, mainRect) {
+        var host = el;
+        for (var up = 0; up < 6 && host.parentElement && host.parentElement !== document.body && host.parentElement !== mainEl; up++) {
+            var p = host.parentElement;
+            if (p.id === 'app' || p.classList.contains('app-wrapper-web') || p.getAttribute('data-wa-flex-container') === 'true') break;
+            var pR = p.getBoundingClientRect();
+            var pW = p.offsetWidth || pR.width;
+            var pH = p.offsetHeight || pR.height;
+            if (mainRect && pH >= mainRect.height * 0.82 && pW >= mainRect.width * 0.88) break;
+            if (p.querySelector('[role="application"]')) break;
+            var pCs = window.getComputedStyle(p);
+            host = p;
+            if ((pCs.position === 'fixed' || pCs.position === 'absolute') && pH >= 110 && pW >= 160) break;
+        }
+        return host;
+    }
+
+    function syncFloatingPickerBounds() {
+        var mainEl = document.getElementById('main');
+        var mainRect = mainEl ? mainEl.getBoundingClientRect() : null;
+        var selector = '[data-animate-picker], [data-animate-modal-popup], [data-animate-dropdown-item], ' +
+            '[role="dialog"], [role="menu"], [role="listbox"], #main [role="tablist"], #app > div > span [role="tablist"], #app > div > div [role="tablist"]';
+        if (performance.now() < pickerOpeningUntil) {
+            selector += ', #app > div > span > div, #app > div > div > span > div';
+        }
+        var candidates = document.querySelectorAll(selector);
+        var processedHosts = [];
+        for (var i = 0; i < candidates.length; i++) {
+            var el = candidates[i];
+            if (!isPopupCandidatePresent(el)) continue;
+            if (el.closest('#side, header, [data-wa-nav-rail="true"], [data-wa-side-column="true"], [data-wa-tab-side-column="true"], [data-wa-left-drawer="true"], [data-wa-right-column="true"]')) {
+                continue;
+            }
+            var host = resolveFloatingPopupHost(el, mainEl, mainRect);
+            if (!host || processedHosts.indexOf(host) !== -1) continue;
+            processedHosts.push(host);
+            var hRect = host.getBoundingClientRect();
+            var hW = host.offsetWidth || hRect.width;
+            var hH = host.offsetHeight || hRect.height;
+            if (hW >= 160 && hH >= 110) {
+                if (host.matches('[data-animate-picker], [data-animate-modal-popup], [role="dialog"], [role="menu"], [role="listbox"]') ||
+                    host.querySelector('[role="tablist"], [data-animate-picker], input[type="search"], input[placeholder]')) {
+                    attachPopupHostStyleObserver(host);
+                    clampFloatingPickerViewport(host);
+                }
+            }
+        }
+    }
+
+    function hasActiveFloatingPickerOrModal() {
+        var blurOv = document.getElementById('wa-privacy-blur-overlay');
+        if (blurOv && isElementVisible(blurOv)) return true;
+
+        var mainEl = document.getElementById('main');
+        var mainRect = mainEl ? mainEl.getBoundingClientRect() : null;
+        var footerExpanded = false;
+        if (mainEl) {
+            var footerEl = mainEl.querySelector('footer');
+            if (footerEl) {
+                var fRect = footerEl.getBoundingClientRect();
+                if (fRect.height >= 165) {
+                    footerExpanded = true;
+                }
+            }
+        }
+
+        var candidates = document.querySelectorAll(
+            '[data-animate-picker], [data-animate-modal-popup], [data-animate-dropdown-item], ' +
+            '[role="dialog"], [role="menu"], [role="listbox"], #main [role="tablist"], #app > div > span [role="tablist"], #app > div > div [role="tablist"]'
+        );
+        for (var i = 0; i < candidates.length; i++) {
+            var el = candidates[i];
+            if (!isElementVisible(el)) continue;
+            if (el.closest('#side, header, [data-wa-nav-rail="true"], [data-wa-side-column="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"], [data-wa-left-drawer="true"], [data-wa-right-column="true"]')) {
+                continue;
+            }
+            var host = resolveFloatingPopupHost(el, mainEl, mainRect);
+            var hRect = host.getBoundingClientRect();
+            if (hRect.width >= 160 && hRect.height >= 110) {
+                return true;
+            }
+        }
+        return footerExpanded;
+    }
+
+    function isFloatingPanelOverResizer(rRect) {
+        var mainEl = document.getElementById('main');
+        if (mainEl) {
+            var mainRect = mainEl.getBoundingClientRect();
+            // 1. Si footer se expandio verticalmente (panel de emojis/stickers/GIFs dentro de footer)
+            var footerEl = mainEl.querySelector('footer');
+            if (footerEl) {
+                var fRect = footerEl.getBoundingClientRect();
+                if (fRect.height >= 150 && rectsIntersect(fRect, rRect, 24)) {
+                    return true;
+                }
+            }
+            // 2. Pickers, tablists o paneles intermedios realmente visibles en #main
+            var pickers = mainEl.querySelectorAll('[data-animate-picker], [role="tablist"], [role="dialog"], [role="menu"], [role="listbox"]');
+            for (var p = 0; p < pickers.length; p++) {
+                var pk = pickers[p];
+                if (pk.closest('header')) continue;
+                if (!isElementVisible(pk)) continue;
+                var host = pk;
+                for (var up = 0; up < 5 && host.parentElement && host.parentElement !== mainEl; up++) {
+                    var parentCand = host.parentElement;
+                    var pRect = parentCand.getBoundingClientRect();
+                    if (pRect.height >= mainRect.height * 0.78) break;
+                    if (parentCand.querySelector('[role="application"]')) break;
+                    host = parentCand;
+                    if (pRect.height >= 120 && pRect.width >= 160) break;
+                }
+                if (!isElementVisible(host)) continue;
+                var pr = host.getBoundingClientRect();
+                if (pr.height >= 110 && pr.height < mainRect.height * 0.80 && rectsIntersect(pr, rRect, 24)) {
+                    return true;
+                }
+            }
+        }
+        // 3. Menus, dialogs o pickers flotantes sobre el resizer
+        if (typeof document.elementsFromPoint === 'function') {
+            var probeXs = [Math.round(rRect.left - 12), Math.round(rRect.left + rRect.width / 2), Math.round(rRect.right + 12)];
+            var probeYs = [0.2, 0.4, 0.6, 0.75, 0.88];
+            for (var xi = 0; xi < probeXs.length; xi++) {
+                var px = probeXs[xi];
+                if (px < 2 || px > window.innerWidth - 2) continue;
+                for (var yi = 0; yi < probeYs.length; yi++) {
+                    var py = Math.round(rRect.top + rRect.height * probeYs[yi]);
+                    var stack = document.elementsFromPoint(px, py);
+                    for (var si = 0; si < stack.length; si++) {
+                        var el = stack[si];
+                        if (!el || el === resizerElement || el === rightResizerElement) continue;
+                        if (el.closest('header, [data-wa-right-column="true"], [data-wa-left-drawer="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]')) continue;
+                        var floatAnc = el.closest('[role="dialog"], [role="menu"], [role="listbox"], [data-animate-picker], [data-animate-dropdown-item], [data-animate-modal-popup]');
+                        if (floatAnc && !floatAnc.closest('[data-wa-right-column="true"], [data-wa-left-drawer="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]') && isElementVisible(floatAnc)) return true;
+                    }
+                }
+            }
+        }
+        return false;
+    }
+
+    function isResizerCovered(resizerEl, clientX, clientY, hasFloatingOverlay) {
+        if (!resizerEl || !resizerEl.isConnected || resizerEl.style.display === 'none') return false;
+        if (hasFloatingOverlay) return true;
+        var rRect = resizerEl.getBoundingClientRect();
+        if (rRect.width <= 0 || rRect.height <= 0) return false;
+
+        var globalOverlays = document.querySelectorAll(OVERLAY_CHECK_SELECTOR);
+        for (var i = 0; i < globalOverlays.length; i++) {
+            var ov = globalOverlays[i];
+            if (!isElementVisible(ov)) continue;
+            if (ov.id === 'wa-privacy-blur-overlay') return true;
+            if (ov.closest('[data-wa-right-column="true"], [data-wa-left-drawer="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]')) continue;
+            var ovRect = ov.getBoundingClientRect();
+            var isBigOverlay = ovRect.width >= window.innerWidth * 0.40 && ovRect.height >= window.innerHeight * 0.40;
+            if (isBigOverlay) {
+                return true;
+            }
+            if (rectsIntersect(ovRect, rRect, 18)) {
+                return true;
+            }
+        }
+        if (isFloatingPanelOverResizer(rRect)) {
+            return true;
+        }
+        var midX = rRect.left + rRect.width / 2;
+        var sampleYs = [rRect.top + rRect.height * 0.2, rRect.top + rRect.height * 0.5, rRect.top + rRect.height * 0.8];
+        for (var sy = 0; sy < sampleYs.length; sy++) {
+            if (isPointCoveredByOverlay(resizerEl, midX, sampleYs[sy])) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function applyResizerDisabledState(resizerEl, disabled) {
+        if (!resizerEl) return;
+        if (disabled) {
+            if (!resizerEl.classList.contains('wa-resizer-disabled')) {
+                resizerEl.classList.add('wa-resizer-disabled');
+            }
+            resizerEl.style.setProperty('pointer-events', 'none', 'important');
+            resizerEl.style.setProperty('visibility', 'hidden', 'important');
+        } else {
+            if (resizerEl.classList.contains('wa-resizer-disabled')) {
+                resizerEl.classList.remove('wa-resizer-disabled');
+            }
+            resizerEl.style.removeProperty('pointer-events');
+            resizerEl.style.removeProperty('visibility');
+        }
+    }
+
+    function syncResizerOverlayState(clientX, clientY) {
+        syncFloatingPickerBounds();
+        var hasFloatingOverlay = hasActiveFloatingPickerOrModal();
+        if (resizerElement && !isDragging) {
+            var hasTabOrDrawer = false;
+            var tabColsCheck = document.querySelectorAll('[data-wa-tab-side-column="true"], [data-wa-left-drawer="true"]');
+            for (var tcc = 0; tcc < tabColsCheck.length; tcc++) {
+                var tccR = tabColsCheck[tcc].getBoundingClientRect();
+                if (tccR.width > 0 && tccR.height > 0) {
+                    hasTabOrDrawer = true;
+                    break;
+                }
+            }
+            var leftCovered = ((isCompactActive() && !hasTabOrDrawer) || hasFloatingOverlay) ? true : isResizerCovered(resizerElement, clientX, clientY, false);
+            applyResizerDisabledState(resizerElement, leftCovered);
+        }
+        if (rightResizerElement && !isRightDragging) {
+            var rightCovered = hasFloatingOverlay ? true : isResizerCovered(rightResizerElement, clientX, clientY, false);
+            applyResizerDisabledState(rightResizerElement, rightCovered);
+        }
+    }
+
+    function scheduleResizerOverlayCheck() {
+        if (overlayCheckRafPending) return;
+        overlayCheckRafPending = true;
+        window.requestAnimationFrame(function() {
+            overlayCheckRafPending = false;
+            syncResizerOverlayState(lastPointerX, lastPointerY);
+        });
+    }
+
+    function ensureHoverTooltip() {
+        if (!document.body) return null;
+        if (hoverTooltipEl && hoverTooltipEl.isConnected) return hoverTooltipEl;
+        hoverTooltipEl = document.getElementById('wa-compact-hover-tooltip');
+        if (!hoverTooltipEl) {
+            hoverTooltipEl = document.createElement('div');
+            hoverTooltipEl.id = 'wa-compact-hover-tooltip';
+            hoverTooltipEl.setAttribute('role', 'tooltip');
+            document.body.appendChild(hoverTooltipEl);
+        }
+        return hoverTooltipEl;
+    }
+
+    function hideHoverTooltip() {
+        hoverTooltipActiveRow = null;
+        if (hoverTooltipEl) {
+            hoverTooltipEl.classList.remove('is-visible');
+        }
+    }
+
+    function computeRowChatName(row) {
+        if (!row) return '';
+        var titled = row.querySelector('span[title][dir="auto"], span[title]');
+        if (titled) {
+            var tv = (titled.getAttribute('title') || '').trim();
+            if (!tv) tv = (titled.getAttribute('data-wa-orig-title') || '').trim();
+            if (!tv) tv = (titled.textContent || '').trim();
+            if (tv) return tv;
+        }
+        var origTitled = row.querySelector('[data-wa-orig-title]');
+        if (origTitled) {
+            var ov = (origTitled.getAttribute('data-wa-orig-title') || '').trim();
+            if (ov) return ov;
+        }
+        var dirAuto = row.querySelector('[dir="auto"]');
+        if (dirAuto) {
+            var dv = (dirAuto.textContent || '').trim();
+            if (dv) return dv;
+        }
+        var textCol = row.querySelector('[data-wa-text-col="true"]') || row;
+        var lines = (textCol.textContent || '').split(/\n+/);
+        for (var li = 0; li < lines.length; li++) {
+            var lv = lines[li].trim();
+            if (lv) return lv;
+        }
+        return '';
+    }
+
+    function extractRowChatName(row) {
+        if (!row) return '';
+        var cached = row.getAttribute('data-wa-chat-title');
+        if (cached) return cached;
+        var name = computeRowChatName(row);
+        if (name) {
+            row.setAttribute('data-wa-chat-title', name);
+        }
+        return name;
+    }
+
+    function suppressNativeTitles(row) {
+        if (row.hasAttribute('title')) {
+            row.setAttribute('data-wa-orig-title', row.getAttribute('title'));
+            row.removeAttribute('title');
+        }
+        var titled = row.querySelectorAll('[title]');
+        for (var ti = 0; ti < titled.length; ti++) {
+            var tEl = titled[ti];
+            if (tEl.closest('.wa-alt-badge')) continue;
+            tEl.setAttribute('data-wa-orig-title', tEl.getAttribute('title'));
+            tEl.removeAttribute('title');
+        }
+    }
+
+    function restoreNativeTitles() {
+        var saved = document.querySelectorAll('[data-wa-orig-title]');
+        for (var ri = 0; ri < saved.length; ri++) {
+            var rEl = saved[ri];
+            if (!rEl.hasAttribute('title')) {
+                rEl.setAttribute('title', rEl.getAttribute('data-wa-orig-title'));
+            }
+            rEl.removeAttribute('data-wa-orig-title');
+        }
+    }
+
+    function positionHoverTooltip(clientX, clientY) {
+        if (!hoverTooltipEl) return;
+        var margin = 8;
+        var offset = 14;
+        var rect = hoverTooltipEl.getBoundingClientRect();
+        var w = rect.width || hoverTooltipEl.offsetWidth || 120;
+        var h = rect.height || hoverTooltipEl.offsetHeight || 30;
+        var x = clientX + offset;
+        var y = clientY + offset;
+        if (x + w > window.innerWidth - margin) {
+            x = Math.max(margin, clientX - w - offset);
+        }
+        if (y + h > window.innerHeight - margin) {
+            y = Math.max(margin, clientY - h - offset);
+        }
+        x = Math.max(margin, Math.min(x, window.innerWidth - w - margin));
+        y = Math.max(margin, Math.min(y, window.innerHeight - h - margin));
+        hoverTooltipEl.style.setProperty('left', Math.round(x) + 'px', 'important');
+        hoverTooltipEl.style.setProperty('top', Math.round(y) + 'px', 'important');
+    }
+
+    function handleCompactTooltipPointerMove(e) {
+        if (!isCompactActive() || isDragging || isRightDragging) {
+            hideHoverTooltip();
+            return;
+        }
+        var target = e.target;
+        if (!target || !target.closest) {
+            hideHoverTooltip();
+            return;
+        }
+        var pane = document.getElementById('pane-side');
+        if (!pane || !pane.contains(target)) {
+            hideHoverTooltip();
+            return;
+        }
+        var row = target.closest('[role="row"], [role="listitem"], div[data-testid="cell-frame-container"]');
+        if (!row) {
+            var virt = target.closest('div[style*="translateY"], div[style*="translate3d"]');
+            if (virt && pane.contains(virt) && virt !== pane && virt.querySelector('img, span[data-icon], svg')) {
+                row = virt;
+            }
+        }
+        if (!row || !pane.contains(row) || row.getAttribute('data-wa-compact-hide') === 'true') {
+            hideHoverTooltip();
+            return;
+        }
+        var name = extractRowChatName(row);
+        if (!name) {
+            hideHoverTooltip();
+            return;
+        }
+        var tip = ensureHoverTooltip();
+        if (!tip) return;
+        if (hoverTooltipActiveRow !== row || tip.textContent !== name) {
+            hoverTooltipActiveRow = row;
+            tip.textContent = name;
+        }
+        tip.classList.add('is-visible');
+        positionHoverTooltip(e.clientX, e.clientY);
+    }
+
+    function isCircularRadius(el) {
+        if (!el) return false;
+        var cs = window.getComputedStyle(el);
+        var radius = cs.borderTopLeftRadius || '';
+        var clip = cs.clipPath || '';
+        return radius.indexOf('50%') !== -1 || parseFloat(radius) >= 75 || clip.indexOf('circle') !== -1;
+    }
+
+    function hasLargeProgressCircle(el) {
+        if (!el) return false;
+        var circles = el.querySelectorAll('svg circle');
+        for (var i = 0; i < circles.length; i++) {
+            var svg = circles[i].closest('svg');
+            if (!svg) continue;
+            var r = svg.getBoundingClientRect();
+            if (r.width >= 130 && r.height >= 130 && Math.abs(r.width - r.height) <= 28) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    var lastVideoNotesDiagnostics = [];
+
+    function collectVideoNoteSeeds(mainEl) {
+        var seeds = [];
+        var raw = mainEl.querySelectorAll('video, img:not(.emoji):not([data-plain-text]), canvas, svg circle');
+        for (var i = raw.length - 1; i >= 0; i--) {
+            var el = raw[i];
+            if (el.closest('header, footer')) continue;
+            var tag = el.tagName ? el.tagName.toLowerCase() : '';
+            var seedNode = (tag === 'circle') ? (el.closest('svg') || el) : el;
+            var r = seedNode.getBoundingClientRect();
+            if (tag === 'circle') {
+                if (r.width >= 130 && r.width <= 360 && r.height >= 130 && r.height <= 360 && Math.abs(r.width - r.height) <= 28) {
+                    if (seeds.indexOf(seedNode) === -1) {
+                        seeds.push(seedNode);
+                    }
+                }
+            } else {
+                // No exigir que el propio video/img sea cuadrado (puede ser 9:16 o 3:4 recortado por un ancestro circular 200x200)
+                if (r.width >= 120 && r.height >= 120 && Math.min(r.width, r.height) <= 360) {
+                    if (seeds.indexOf(seedNode) === -1) {
+                        seeds.push(seedNode);
+                    }
+                }
+            }
+        }
+        var divs = mainEl.querySelectorAll('div, span');
+        var scannedDivs = 0;
+        for (var d = divs.length - 1; d >= 0 && scannedDivs < 2000; d--) {
+            var dv = divs[d];
+            if (dv.closest('header, footer')) continue;
+            scannedDivs++;
+            var dr = dv.getBoundingClientRect();
+            if (dr.width < 150 || dr.width > 340 || dr.height < 150 || dr.height > 340 || Math.abs(dr.width - dr.height) > 16) continue;
+            var dCs = window.getComputedStyle(dv);
+            var hasBgImg = dCs.backgroundImage && dCs.backgroundImage !== 'none' && dCs.backgroundImage.indexOf('url(') !== -1;
+            var isCirc = isCircularRadius(dv) && (dCs.overflow === 'hidden' || dCs.overflowX === 'hidden' || hasBgImg);
+            if (hasBgImg || isCirc) {
+                if (seeds.indexOf(dv) === -1) {
+                    seeds.push(dv);
+                }
+            }
+        }
+        return seeds;
+    }
+
+    function summarizeVideoNoteSubtree(rootEl, maxNodes) {
+        if (!rootEl) return [];
+        var out = [];
+        var limit = maxNodes || 35;
+        function walk(node, depth) {
+            if (!node || node.nodeType !== 1 || out.length >= limit || depth > 7) return;
+            var r = node.getBoundingClientRect();
+            var cs = window.getComputedStyle(node);
+            out.push({
+                depth: depth,
+                tag: node.tagName ? node.tagName.toLowerCase() : '',
+                cls: (typeof node.className === 'string' && node.className.length > 0) ? node.className.slice(0, 60) : '',
+                role: node.getAttribute('role') || '',
+                rect: {
+                    top: Math.round(r.top * 10) / 10,
+                    bottom: Math.round(r.bottom * 10) / 10,
+                    left: Math.round(r.left * 10) / 10,
+                    right: Math.round(r.right * 10) / 10,
+                    width: Math.round(r.width * 10) / 10,
+                    height: Math.round(r.height * 10) / 10
+                },
+                position: cs.position,
+                topBottom: cs.top + ' / ' + cs.bottom,
+                overflow: cs.overflow,
+                borderRadius: cs.borderTopLeftRadius,
+                padding: cs.paddingTop + ' ' + cs.paddingRight + ' ' + cs.paddingBottom + ' ' + cs.paddingLeft,
+                margin: cs.marginTop + ' ' + cs.marginRight + ' ' + cs.marginBottom + ' ' + cs.marginLeft,
+                borderWidth: cs.borderTopWidth + ' ' + cs.borderRightWidth + ' ' + cs.borderBottomWidth + ' ' + cs.borderLeftWidth,
+                backgroundColor: cs.backgroundColor,
+                transform: cs.transform,
+                translate: cs.translate || 'none',
+                vnOuter: node.getAttribute('data-wa-video-note') || '',
+                vnInner: node.getAttribute('data-wa-video-note-inner') || '',
+                vnFixed: node.getAttribute('data-wa-video-note-fixed') || ''
+            });
+            var children = node.children;
+            for (var c = 0; c < children.length; c++) {
+                walk(children[c], depth + 1);
+            }
+        }
+        walk(rootEl, 0);
+        return out;
+    }
+
+    window.__waInspectVideoNotes = function() {
+        var mainEl = document.getElementById('main');
+        if (!mainEl) return { seeds: [], decisions: lastVideoNotesDiagnostics };
+        tagVideoNotes();
+        var seeds = collectVideoNoteSeeds(mainEl);
+        var report = [];
+        for (var i = 0; i < seeds.length; i++) {
+            var s = seeds[i];
+            var chainInfo = [];
+            var curr = s;
+            var topCircAncestor = null;
+            for (var lvl = 0; lvl < 11 && curr && curr !== mainEl; lvl++) {
+                var r = curr.getBoundingClientRect();
+                var cs = window.getComputedStyle(curr);
+                if (r.width >= 160 && r.width <= 340 && Math.abs(r.width - r.height) <= 18 && isCircularRadius(curr)) {
+                    topCircAncestor = curr;
+                }
+                chainInfo.push({
+                    lvl: lvl,
+                    tag: curr.tagName ? curr.tagName.toLowerCase() : '',
+                    rect: {
+                        top: Math.round(r.top * 10) / 10,
+                        bottom: Math.round(r.bottom * 10) / 10,
+                        left: Math.round(r.left * 10) / 10,
+                        right: Math.round(r.right * 10) / 10,
+                        width: Math.round(r.width * 10) / 10,
+                        height: Math.round(r.height * 10) / 10
+                    },
+                    display: cs.display,
+                    position: cs.position,
+                    topBottom: cs.top + ' / ' + cs.bottom,
+                    overflow: cs.overflow,
+                    borderRadius: cs.borderTopLeftRadius,
+                    clipPath: cs.clipPath,
+                    padding: cs.paddingTop + ' ' + cs.paddingRight + ' ' + cs.paddingBottom + ' ' + cs.paddingLeft,
+                    margin: cs.marginTop + ' ' + cs.marginRight + ' ' + cs.marginBottom + ' ' + cs.marginLeft,
+                    borderWidth: cs.borderTopWidth + ' ' + cs.borderRightWidth + ' ' + cs.borderBottomWidth + ' ' + cs.borderLeftWidth,
+                    backgroundColor: cs.backgroundColor,
+                    backgroundImage: cs.backgroundImage !== 'none' ? 'url(...)' : 'none',
+                    transform: cs.transform,
+                    translate: cs.translate || 'none',
+                    childCount: curr.children ? curr.children.length : 0,
+                    hasProgressSvg: hasLargeProgressCircle(curr)
+                });
+                curr = curr.parentElement;
+            }
+            report.push({
+                seedIndex: i,
+                seedTag: s.tagName ? s.tagName.toLowerCase() : '',
+                chain: chainInfo,
+                subtree: topCircAncestor ? summarizeVideoNoteSubtree(topCircAncestor, 35) : []
+            });
+        }
+        return {
+            seeds: report,
+            decisions: lastVideoNotesDiagnostics
+        };
+    };
+
+    function tagVideoNotes() {
+        var mainEl = document.getElementById('main');
+        if (!mainEl) return;
+
+        var seeds = collectVideoNoteSeeds(mainEl);
+        var processedOuters = [];
+        var diagnostics = [];
+
+        for (var i = 0; i < seeds.length; i++) {
+            var seed = seeds[i];
+            var chain = [];
+            var curr = seed;
+            for (var lvl = 0; lvl < 11 && curr && curr !== mainEl; lvl++) {
+                var r = curr.getBoundingClientRect();
+                if (r.width >= 120 && r.height >= 120 && Math.min(r.width, r.height) <= 370) {
+                    var cs = window.getComputedStyle(curr);
+                    var bgCol = parseCssColor(cs.backgroundColor);
+                    var hasOpaqueBg = !!(bgCol && bgCol.a > 0.3);
+                    var hasBorder = (parseFloat(cs.borderTopWidth) || 0) >= 1 || (parseFloat(cs.borderBottomWidth) || 0) >= 1;
+                    var isSquareCircleRange = r.width >= 160 && r.width <= 340 && r.height >= 160 && r.height <= 340 && Math.abs(r.width - r.height) <= 16;
+                    var hasClip = cs.overflow === 'hidden' || cs.overflowX === 'hidden' || cs.overflowY === 'hidden';
+                    chain.push({
+                        el: curr,
+                        rect: r,
+                        cs: cs,
+                        isSquareCircleRange: isSquareCircleRange,
+                        circular: isCircularRadius(curr),
+                        hasClip: hasClip,
+                        hasOpaqueBg: hasOpaqueBg,
+                        hasBorder: hasBorder,
+                        hasProgressSvg: hasLargeProgressCircle(curr)
+                    });
+                }
+                curr = curr.parentElement;
+            }
+            if (chain.length < 2) continue;
+
+            // Buscar el par concentrico real (outer, inner):
+            // outer: ancestro circular (160..340px, |w-h| <= 16) con fondo/borde/progreso
+            // inner: el ancestro mas externo dentro de outer que sea estrictamente mas pequeno en AMBOS ejes por 3..22px
+            var matchedOuterItem = null;
+            var matchedInnerItem = null;
+
+            for (var outIdx = chain.length - 1; outIdx >= 1; outIdx--) {
+                var candOut = chain[outIdx];
+                if (!candOut.isSquareCircleRange) continue;
+                if (!candOut.circular && !candOut.hasProgressSvg) continue;
+
+                for (var inIdx = outIdx - 1; inIdx >= 0; inIdx--) {
+                    var candIn = chain[inIdx];
+                    if (!candIn.isSquareCircleRange) continue;
+                    var dw = candOut.rect.width - candIn.rect.width;
+                    var dh = candOut.rect.height - candIn.rect.height;
+                    if (dw >= 2.5 && dw <= 22 && dh >= 2.5 && dh <= 22 && (candIn.circular || candIn.hasClip)) {
+                        matchedOuterItem = candOut;
+                        matchedInnerItem = candIn;
+                        break;
+                    }
+                }
+                if (matchedOuterItem && matchedInnerItem) break;
+            }
+
+            // Si el descendiente mas pequeno no estaba en la cadena directa de la semilla (p. ej. la semilla fue el svg de progreso),
+            // buscar dentro del ancestro circular externo un hijo/descendiente circular que sea 3..22px menor en ambos ejes
+            if (!matchedOuterItem) {
+                for (var c2 = chain.length - 1; c2 >= 0; c2--) {
+                    var topCand = chain[c2];
+                    if (!topCand.isSquareCircleRange || (!topCand.circular && !topCand.hasProgressSvg)) continue;
+                    var subDivs = topCand.el.querySelectorAll('div, span, video, img:not(.emoji), canvas');
+                    for (var sd = 0; sd < subDivs.length; sd++) {
+                        var subEl = subDivs[sd];
+                        if (subEl.tagName && subEl.tagName.toLowerCase() === 'svg') continue;
+                        var sr = subEl.getBoundingClientRect();
+                        if (sr.width < 160 || sr.width > 340 || Math.abs(sr.width - sr.height) > 16) continue;
+                        var sdw = topCand.rect.width - sr.width;
+                        var sdh = topCand.rect.height - sr.height;
+                        if (sdw >= 2.5 && sdw <= 22 && sdh >= 2.5 && sdh <= 22) {
+                            var subCs = window.getComputedStyle(subEl);
+                            var subCirc = isCircularRadius(subEl) || subCs.overflow === 'hidden' || subCs.overflowX === 'hidden';
+                            if (subCirc) {
+                                matchedOuterItem = topCand;
+                                matchedInnerItem = {
+                                    el: subEl,
+                                    rect: sr,
+                                    cs: subCs
+                                };
+                                break;
+                            }
+                        }
+                    }
+                    if (matchedOuterItem && matchedInnerItem) break;
+                }
+            }
+
+            if (!matchedOuterItem || !matchedInnerItem) continue;
+
+            var outer = matchedOuterItem.el;
+            var inner = matchedInnerItem.el;
+            if (outer === inner || processedOuters.indexOf(outer) !== -1) continue;
+            processedOuters.push(outer);
+
+            // Subir inner al ancestro mas externo que conserve el mismo tamano ~200x200 (diferencia 3..22px respecto a outer)
+            // y que NO sea un contenedor que incluya un hermano SVG de tamano outer (~208x208)
+            var outRect0 = outer.getBoundingClientRect();
+            while (inner.parentElement && inner.parentElement !== outer && outer.contains(inner.parentElement)) {
+                var pEl = inner.parentElement;
+                var pR = pEl.getBoundingClientRect();
+                var pdw = outRect0.width - pR.width;
+                var pdh = outRect0.height - pR.height;
+                if (pdw < 2.5 || pdw > 22 || pdh < 2.5 || pdh > 22) break;
+                var hasOuterSizedSvg = false;
+                var pSvgs = pEl.querySelectorAll('svg');
+                for (var ps = 0; ps < pSvgs.length; ps++) {
+                    var svgR = pSvgs[ps].getBoundingClientRect();
+                    if (svgR.width > pR.width + 2 || svgR.height > pR.height + 2) {
+                        hasOuterSizedSvg = true;
+                        break;
+                    }
+                }
+                if (hasOuterSizedSvg) break;
+                inner = pEl;
+            }
+
+            // Nivel 1: Igualar asimetrias de padding/margin/border/top en la cadena DESDE inner HASTA outer (INCLUYENDO outer!)
+            // Nunca poner padding: 0 ni width/height: 100% (para conservar intacto el anillo de 4px y la barra de progreso)
+            var adjustedByLayout = false;
+            var currNode = inner;
+            while (currNode && (currNode === outer || outer.contains(currNode))) {
+                var nCs = window.getComputedStyle(currNode);
+                var pt = parseFloat(nCs.paddingTop) || 0;
+                var pb = parseFloat(nCs.paddingBottom) || 0;
+                var pl = parseFloat(nCs.paddingLeft) || 0;
+                var pr = parseFloat(nCs.paddingRight) || 0;
+                if (Math.abs(pt - pb) >= 1.2 && (pt + pb) > 0) {
+                    var avgV = ((pt + pb) / 2).toFixed(2) + 'px';
+                    currNode.style.setProperty('padding-top', avgV, 'important');
+                    currNode.style.setProperty('padding-bottom', avgV, 'important');
+                    if (Math.abs(pl - pr) >= 1.2 && (pl + pr) > 0) {
+                        var avgH = ((pl + pr) / 2).toFixed(2) + 'px';
+                        currNode.style.setProperty('padding-left', avgH, 'important');
+                        currNode.style.setProperty('padding-right', avgH, 'important');
+                    }
+                    adjustedByLayout = true;
+                }
+                var mt = parseFloat(nCs.marginTop) || 0;
+                var mb = parseFloat(nCs.marginBottom) || 0;
+                if (Math.abs(mt - mb) >= 1.2 && (Math.abs(mt) > 0.5 || Math.abs(mb) > 0.5)) {
+                    var avgM = ((mt + mb) / 2).toFixed(2) + 'px';
+                    currNode.style.setProperty('margin-top', avgM, 'important');
+                    currNode.style.setProperty('margin-bottom', avgM, 'important');
+                    adjustedByLayout = true;
+                }
+                var bt = parseFloat(nCs.borderTopWidth) || 0;
+                var bb = parseFloat(nCs.borderBottomWidth) || 0;
+                if (Math.abs(bt - bb) >= 1.2 && (bt + bb) > 0) {
+                    var avgB = ((bt + bb) / 2).toFixed(2) + 'px';
+                    currNode.style.setProperty('border-top-width', avgB, 'important');
+                    currNode.style.setProperty('border-bottom-width', avgB, 'important');
+                    adjustedByLayout = true;
+                }
+
+                // Ocultar hermanos espaciadores vacios de poca altura (2..14px) que empujen inner hacia abajo
+                var prevSib = currNode.previousElementSibling;
+                if (prevSib && currNode !== outer && currNode.parentElement && outer.contains(currNode.parentElement)) {
+                    var psRect = prevSib.getBoundingClientRect();
+                    var psPos = window.getComputedStyle(prevSib).position;
+                    if (psPos !== 'absolute' && psPos !== 'fixed' &&
+                        psRect.height >= 2 && psRect.height <= 14 &&
+                        prevSib.children.length === 0 && (prevSib.textContent || '').trim().length === 0) {
+                        prevSib.style.setProperty('display', 'none', 'important');
+                        adjustedByLayout = true;
+                    }
+                }
+                if (currNode === outer) break;
+                currNode = currNode.parentElement;
+            }
+
+            outer.setAttribute('data-wa-video-note', 'true');
+            inner.setAttribute('data-wa-video-note-inner', 'true');
+
+            var iCs = window.getComputedStyle(inner);
+            if (iCs.display === 'inline') {
+                inner.style.setProperty('display', 'block', 'important');
+            }
+
+            // Nivel 2: Re-medir la mascara circular inner (200x200) respecto al anillo outer (208x208) y centrar con translate
+            var prevDx = parseFloat(inner.getAttribute('data-wa-vn-dx') || '0') || 0;
+            var prevDy = parseFloat(inner.getAttribute('data-wa-vn-dy') || '0') || 0;
+
+            var outRect = outer.getBoundingClientRect();
+            var inRect = inner.getBoundingClientRect();
+
+            var naturalTopGap = (inRect.top - prevDy) - outRect.top;
+            var naturalBottomGap = outRect.bottom - (inRect.bottom - prevDy);
+            var naturalLeftGap = (inRect.left - prevDx) - outRect.left;
+            var naturalRightGap = outRect.right - (inRect.right - prevDx);
+
+            var dy = (naturalBottomGap - naturalTopGap) / 2;
+            var dx = (naturalRightGap - naturalLeftGap) / 2;
+            var appliedMethod = adjustedByLayout ? 'layout' : 'none';
+
+            if ((Math.abs(dy) > 0.4 || Math.abs(dx) > 0.4) && Math.abs(dy) < 22 && Math.abs(dx) < 22) {
+                var dxStr = dx.toFixed(2);
+                var dyStr = dy.toFixed(2);
+                inner.style.setProperty('translate', dxStr + 'px ' + dyStr + 'px', 'important');
+                inner.setAttribute('data-wa-vn-shifted', 'true');
+                inner.setAttribute('data-wa-vn-dx', dxStr);
+                inner.setAttribute('data-wa-vn-dy', dyStr);
+                appliedMethod = adjustedByLayout ? 'layout+translate' : 'translate';
+
+                // Verificacion post-escritura: si translate no movio el boundingClientRect de inner, aplicar position: relative + top/left
+                var checkRect = inner.getBoundingClientRect();
+                var checkTopGap = checkRect.top - outRect.top;
+                var checkBottomGap = outRect.bottom - checkRect.bottom;
+                if (Math.abs(checkBottomGap - checkTopGap) > 1.5) {
+                    var remDy = (checkBottomGap - checkTopGap) / 2;
+                    var remDx = ((outRect.right - checkRect.right) - (checkRect.left - outRect.left)) / 2;
+                    if (iCs.position === 'static') {
+                        inner.style.setProperty('position', 'relative', 'important');
+                    }
+                    var baseTop = parseFloat(window.getComputedStyle(inner).top) || 0;
+                    var baseLeft = parseFloat(window.getComputedStyle(inner).left) || 0;
+                    inner.style.setProperty('top', (baseTop + remDy).toFixed(2) + 'px', 'important');
+                    inner.style.setProperty('left', (baseLeft + remDx).toFixed(2) + 'px', 'important');
+                    appliedMethod += '+topLeftFallback';
+                }
+            } else if (adjustedByLayout && inner.getAttribute('data-wa-vn-shifted') === 'true') {
+                inner.style.removeProperty('translate');
+                inner.removeAttribute('data-wa-vn-shifted');
+                inner.removeAttribute('data-wa-vn-dx');
+                inner.removeAttribute('data-wa-vn-dy');
+            }
+
+            var finalOutRect = outer.getBoundingClientRect();
+            var finalInRect = inner.getBoundingClientRect();
+            var postTopGap = Math.round((finalInRect.top - finalOutRect.top) * 100) / 100;
+            var postBottomGap = Math.round((finalOutRect.bottom - finalInRect.bottom) * 100) / 100;
+            var postLeftGap = Math.round((finalInRect.left - finalOutRect.left) * 100) / 100;
+            var postRightGap = Math.round((finalOutRect.right - finalInRect.right) * 100) / 100;
+
+            if (Math.abs(postTopGap - postBottomGap) <= 1.5) {
+                outer.setAttribute('data-wa-video-note-fixed', 'true');
+            }
+
+            diagnostics.push({
+                outerSize: Math.round(finalOutRect.width) + 'x' + Math.round(finalOutRect.height),
+                innerSize: Math.round(finalInRect.width) + 'x' + Math.round(finalInRect.height),
+                naturalGaps: {
+                    top: Math.round(naturalTopGap * 100) / 100,
+                    bottom: Math.round(naturalBottomGap * 100) / 100,
+                    left: Math.round(naturalLeftGap * 100) / 100,
+                    right: Math.round(naturalRightGap * 100) / 100
+                },
+                postGaps: {
+                    top: postTopGap,
+                    bottom: postBottomGap,
+                    left: postLeftGap,
+                    right: postRightGap
+                },
+                appliedMethod: appliedMethod,
+                dx: Math.round(dx * 100) / 100,
+                dy: Math.round(dy * 100) / 100
+            });
+        }
+        lastVideoNotesDiagnostics = diagnostics;
+    }
+
+    function updateMainAdaptiveScale() {
+        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+        var mainEl = document.getElementById('main');
+        if (!mainEl) {
+            currentMainScale = 1;
+            return;
+        }
+        var containers = resolveLayoutContainers();
+        var mainCol = (containers && containers.mainColumn) ? containers.mainColumn : mainEl.parentElement;
+        var slotEl = (mainCol && mainCol !== mainEl) ? mainCol : mainEl;
+        var slotRect = slotEl.getBoundingClientRect();
+        var expectedW = slotRect.width;
+        if (currentMainScale === 1 && mainEl !== slotEl) {
+            var mainW = mainEl.getBoundingClientRect().width;
+            if (mainW > 0 && mainW < expectedW) {
+                expectedW = mainW;
+            }
+        }
+        var expectedH = slotRect.height;
+        if (expectedW <= 0) return;
+
+        var scale = 1;
+        if (expectedW < MAIN_SCALE_THRESHOLD) {
+            var raw = Math.max(MAIN_SCALE_MIN, Math.min(1, expectedW / MAIN_SCALE_THRESHOLD));
+            scale = Math.round(raw * 1000) / 1000;
+            if (scale >= 0.99) scale = 1;
+        }
+
+        if (scale === 1) {
+            if (currentMainScale !== 1 || mainEl.classList.contains('wa-main-scaled')) {
+                currentMainScale = 1;
+                document.documentElement.style.removeProperty('--wa-main-scale');
+                mainEl.classList.remove('wa-main-scaled');
+                mainEl.style.removeProperty('zoom');
+                if (mainEl !== mainCol) {
+                    mainEl.style.setProperty('width', '100%', 'important');
+                    mainEl.style.setProperty('height', '100%', 'important');
+                } else {
+                    mainEl.style.removeProperty('width');
+                    mainEl.style.removeProperty('height');
+                }
+            }
+            return;
+        }
+
+        currentMainScale = scale;
+        document.documentElement.style.setProperty('--wa-main-scale', String(scale));
+        mainEl.classList.add('wa-main-scaled');
+        mainEl.style.setProperty('zoom', String(scale), 'important');
+
+        if (mainEl !== mainCol) {
+            mainEl.style.setProperty('width', '100%', 'important');
+            mainEl.style.setProperty('height', '100%', 'important');
+            var mRect = mainEl.getBoundingClientRect();
+            if (mRect.width > 0 && mRect.width < expectedW - 2) {
+                mainEl.style.setProperty('width', Math.ceil(expectedW / scale) + 'px', 'important');
+            }
+            if (expectedH > 0 && mRect.height > 0 && mRect.height < expectedH - 2) {
+                mainEl.style.setProperty('height', Math.ceil(expectedH / scale) + 'px', 'important');
+            }
+        }
+    }
+
+    function scheduleMainScaleUpdate() {
+        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+        if (mainScaleRafPending) return;
+        mainScaleRafPending = true;
+        window.requestAnimationFrame(function() {
+            mainScaleRafPending = false;
+            if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+            updateMainAdaptiveScale();
+        });
+    }
+
+    function ensureMainResizeObserver() {
+        if (!window.ResizeObserver) return;
+        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+        var containers = resolveLayoutContainers();
+        var targets = [];
+        if (containers && containers.mainColumn) targets.push(containers.mainColumn);
+        if (containers && containers.flexContainer) targets.push(containers.flexContainer);
+        var mainEl = document.getElementById('main');
+        if (mainEl && targets.indexOf(mainEl) === -1) targets.push(mainEl);
+
+        for (var i = 0; i < targets.length; i++) {
+            var t = targets[i];
+            if (!t || t.__waMainScaleObserverAttached) continue;
+            t.__waMainScaleObserverAttached = true;
+            var ro = new ResizeObserver(function() {
+                if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+                scheduleMainScaleUpdate();
+            });
+            ro.observe(t);
+        }
+    }
+
+    function resetHorizontalScrollLock(container) {
+        if (document.documentElement && document.documentElement.scrollLeft !== 0) {
+            document.documentElement.scrollLeft = 0;
+        }
+        if (document.body && document.body.scrollLeft !== 0) {
+            document.body.scrollLeft = 0;
+        }
+        var appEl = document.getElementById('app');
+        if (appEl && appEl.scrollLeft !== 0) {
+            appEl.scrollLeft = 0;
+        }
+        var wrapperEl = document.querySelector('.app-wrapper-web');
+        if (wrapperEl && wrapperEl.scrollLeft !== 0) {
+            wrapperEl.scrollLeft = 0;
+        }
+        if (container && container.scrollLeft !== 0) {
+            container.scrollLeft = 0;
+        }
+    }
+
+    function splitMultiColumnWrapper(wrapper) {
+        if (!wrapper || wrapper.children.length === 0) return null;
+        var host = wrapper;
+        for (var depth = 0; depth <= 16; depth++) {
+            var cs = window.getComputedStyle(host);
+            var isRowFlex = (cs.display.indexOf('flex') !== -1 && (cs.flexDirection === 'row' || cs.flexDirection === '')) ||
+                            cs.display.indexOf('grid') !== -1;
+            var visibleCols = [];
+            for (var c = 0; c < host.children.length; c++) {
+                var ch = host.children[c];
+                if (ch.matches('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]')) continue;
+                var chCs = window.getComputedStyle(ch);
+                if (chCs.display === 'none' || chCs.visibility === 'hidden' || chCs.position === 'fixed') continue;
+                var chR = ch.getBoundingClientRect();
+                var hasContent = ch.children.length > 0 || (ch.textContent || '').trim().length > 0 || (chR.width >= 120 && chR.height >= 180);
+                if (!hasContent) continue;
+                visibleCols.push(ch);
+            }
+            if (visibleCols.length >= 3) {
+                var firstR = visibleCols[0].getBoundingClientRect();
+                if (firstR.width <= 84 &&
+                    !visibleCols[0].querySelector('header, h1, h2, input, [role="textbox"], [role="listitem"], [role="row"], button, [role="button"]')) {
+                    visibleCols.shift();
+                }
+            }
+            if (visibleCols.length >= 2) {
+                var r0 = visibleCols[0].getBoundingClientRect();
+                var r1 = visibleCols[1].getBoundingClientRect();
+                var tallEnough = (r0.height >= 180 && r1.height >= 180) || (r0.height === 0 && r1.height === 0 && isRowFlex);
+                var sideBySide = tallEnough && (
+                    (isRowFlex && (r0.width === 0 || (r0.width >= 30 && r1.width >= 30 && Math.abs(r0.top - r1.top) < 120))) ||
+                    (r0.width >= 30 && r1.width >= 30 && r1.left >= r0.left + 20 && Math.abs(r0.top - r1.top) < 120)
+                );
+                if (sideBySide) {
+                    return {
+                        wrapper: wrapper,
+                        innerHost: host,
+                        leftCol: visibleCols[0],
+                        rightCol: visibleCols[1]
+                    };
+                }
+            }
+            if (visibleCols.length === 1) {
+                host = visibleCols[0];
+            } else {
+                break;
+            }
+        }
+        return null;
+    }
+
+    function applyTabShellLayout(outerChild, targetNode, splitInfo, navRailRightPx, tabSidebarW) {
+        if (!splitInfo || !splitInfo.leftCol || !splitInfo.rightCol) return;
+
+        var curr = splitInfo.innerHost;
+        while (curr && curr !== outerChild.parentElement) {
+            curr.removeAttribute('data-wa-left-drawer');
+            curr.removeAttribute('data-wa-right-column');
+            curr.removeAttribute('data-wa-aux-empty');
+            curr.removeAttribute('data-wa-side-column');
+            curr.removeAttribute('data-wa-tab-spacer');
+            clearAuxInlineStyles(curr);
+            curr.setAttribute('data-wa-tab-shell', 'true');
+            curr.style.setProperty('padding-left', '0px', 'important');
+            curr.style.setProperty('padding-inline-start', '0px', 'important');
+            curr.style.setProperty('margin-left', '0px', 'important');
+            curr.style.setProperty('margin-inline-start', '0px', 'important');
+
+            var cCs = window.getComputedStyle(curr);
+            var isAbs = (cCs.position === 'absolute' || cCs.position === 'fixed');
+            if (isAbs) {
+                var currLeftPx = 0;
+                if (curr === outerChild || curr === targetNode) {
+                    if (cCs.position === 'fixed') {
+                        currLeftPx = navRailRightPx;
+                    } else {
+                        var op = curr.offsetParent;
+                        var opLeft = (op && op !== document.body && op !== document.documentElement)
+                            ? Math.round(op.getBoundingClientRect().left)
+                            : 0;
+                        currLeftPx = Math.max(0, navRailRightPx - opLeft);
+                    }
+                    var nativeZ = parseInt(cCs.zIndex, 10);
+                    if (isNaN(nativeZ) || nativeZ < 200) {
+                        curr.style.setProperty('z-index', '200', 'important');
+                    } else if (nativeZ >= 500) {
+                        curr.style.setProperty('z-index', '400', 'important');
+                    }
+                }
+                curr.style.setProperty('left', currLeftPx + 'px', 'important');
+                curr.style.setProperty('inset-inline-start', currLeftPx + 'px', 'important');
+                curr.style.setProperty('right', '0px', 'important');
+                curr.style.setProperty('inset-inline-end', '0px', 'important');
+                curr.style.setProperty('top', '0px', 'important');
+                curr.style.setProperty('bottom', '0px', 'important');
+                curr.style.setProperty('width', 'auto', 'important');
+                curr.style.setProperty('min-width', '0px', 'important');
+                curr.style.setProperty('max-width', 'none', 'important');
+            } else if (curr === outerChild) {
+                curr.style.setProperty('flex', '1 1 0%', 'important');
+                curr.style.setProperty('flex-grow', '1', 'important');
+                curr.style.setProperty('flex-shrink', '1', 'important');
+                curr.style.setProperty('width', 'auto', 'important');
+                curr.style.setProperty('min-width', '0px', 'important');
+                curr.style.setProperty('max-width', 'none', 'important');
+            } else {
+                curr.style.setProperty('flex', '1 1 0%', 'important');
+                curr.style.setProperty('width', '100%', 'important');
+                curr.style.setProperty('min-width', '0px', 'important');
+                curr.style.setProperty('max-width', 'none', 'important');
+            }
+            if (curr === splitInfo.innerHost) {
+                curr.style.setProperty('display', 'flex', 'important');
+                curr.style.setProperty('flex-direction', 'row', 'important');
+                curr.style.setProperty('justify-content', 'flex-start', 'important');
+                curr.style.setProperty('gap', '0px', 'important');
+                curr.style.setProperty('column-gap', '0px', 'important');
+            }
+            if (curr === outerChild) break;
+            curr = curr.parentElement;
+        }
+
+        // Si outerChild tiene un contenedor padre de absOverlay que quedo con width: 0px, limpiarlo y darle tab-shell
+        if (outerChild && !outerChild.hasAttribute('data-wa-tab-shell')) {
+            outerChild.removeAttribute('data-wa-left-drawer');
+            outerChild.removeAttribute('data-wa-right-column');
+            outerChild.removeAttribute('data-wa-aux-empty');
+            clearAuxInlineStyles(outerChild);
+            outerChild.setAttribute('data-wa-tab-shell', 'true');
+            outerChild.style.setProperty('padding-left', '0px', 'important');
+            outerChild.style.setProperty('padding-inline-start', '0px', 'important');
+            outerChild.style.setProperty('margin-left', '0px', 'important');
+            outerChild.style.setProperty('margin-inline-start', '0px', 'important');
+            var ocCs = window.getComputedStyle(outerChild);
+            if (ocCs.position === 'absolute' || ocCs.position === 'fixed') {
+                var ocLeftPx = navRailRightPx;
+                if (ocCs.position === 'absolute') {
+                    var ocOp = outerChild.offsetParent;
+                    var ocOpLeft = (ocOp && ocOp !== document.body && ocOp !== document.documentElement)
+                        ? Math.round(ocOp.getBoundingClientRect().left)
+                        : 0;
+                    ocLeftPx = Math.max(0, navRailRightPx - ocOpLeft);
+                }
+                outerChild.style.setProperty('left', ocLeftPx + 'px', 'important');
+                outerChild.style.setProperty('inset-inline-start', ocLeftPx + 'px', 'important');
+                outerChild.style.setProperty('right', '0px', 'important');
+                outerChild.style.setProperty('inset-inline-end', '0px', 'important');
+                outerChild.style.setProperty('top', '0px', 'important');
+                outerChild.style.setProperty('bottom', '0px', 'important');
+                outerChild.style.setProperty('width', 'auto', 'important');
+                outerChild.style.setProperty('min-width', '0px', 'important');
+                outerChild.style.setProperty('max-width', 'none', 'important');
+                var ocNativeZ = parseInt(ocCs.zIndex, 10);
+                if (isNaN(ocNativeZ) || ocNativeZ < 200) {
+                    outerChild.style.setProperty('z-index', '200', 'important');
+                } else if (ocNativeZ >= 500) {
+                    outerChild.style.setProperty('z-index', '400', 'important');
+                }
+            } else {
+                outerChild.style.setProperty('flex', '1 1 0%', 'important');
+                outerChild.style.setProperty('width', 'auto', 'important');
+                outerChild.style.setProperty('min-width', '0px', 'important');
+                outerChild.style.setProperty('max-width', 'none', 'important');
+            }
+        }
+
+        // Colapsar cualquier espaciador de 64px previo a leftCol dentro de innerHost (y cadena hasta outerChild)
+        var walkNode = splitInfo.leftCol;
+        while (walkNode && walkNode !== outerChild && walkNode.parentElement) {
+            var wParent = walkNode.parentElement;
+            for (var sp = 0; sp < wParent.children.length; sp++) {
+                var sib = wParent.children[sp];
+                if (sib === walkNode) break;
+                if (sib === splitInfo.rightCol) continue;
+                if (sib.matches('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]')) continue;
+                var sibHasRealUi = !!sib.querySelector('header, h1, h2, input, [role="textbox"], [role="listitem"], [role="row"], button, [role="button"]');
+                if (!sibHasRealUi) {
+                    sib.setAttribute('data-wa-tab-spacer', 'true');
+                }
+            }
+            walkNode = wParent;
+        }
+
+        var leftCol = splitInfo.leftCol;
+        leftCol.removeAttribute('data-wa-left-drawer');
+        leftCol.removeAttribute('data-wa-main-column');
+        leftCol.removeAttribute('data-wa-aux-empty');
+        leftCol.removeAttribute('data-wa-tab-shell');
+        leftCol.removeAttribute('data-wa-tab-spacer');
+        clearAuxInlineStyles(leftCol);
+        leftCol.setAttribute('data-wa-tab-side-column', 'true');
+        if (!isCompactActive()) {
+            leftCol.setAttribute('data-wa-side-column', 'true');
+        } else {
+            leftCol.removeAttribute('data-wa-side-column');
+        }
+        leftCol.style.setProperty('flex', '0 0 ' + tabSidebarW + 'px', 'important');
+        leftCol.style.setProperty('flex-basis', tabSidebarW + 'px', 'important');
+        leftCol.style.setProperty('flex-grow', '0', 'important');
+        leftCol.style.setProperty('flex-shrink', '0', 'important');
+        leftCol.style.setProperty('width', tabSidebarW + 'px', 'important');
+        leftCol.style.setProperty('min-width', tabSidebarW + 'px', 'important');
+        leftCol.style.setProperty('max-width', tabSidebarW + 'px', 'important');
+        leftCol.style.setProperty('margin-left', '0px', 'important');
+        leftCol.style.setProperty('margin-inline-start', '0px', 'important');
+        leftCol.style.setProperty('left', '0px', 'important');
+        leftCol.style.setProperty('inset-inline-start', '0px', 'important');
+        leftCol.style.setProperty('transform', 'none', 'important');
+        leftCol.style.setProperty('border-right', '1px solid var(--border-list, rgba(134, 150, 160, 0.22))', 'important');
+        leftCol.style.setProperty('overflow', 'hidden', 'important');
+        leftCol.style.setProperty('box-sizing', 'border-box', 'important');
+
+        var rightCol = splitInfo.rightCol;
+        rightCol.removeAttribute('data-wa-tab-shell');
+        rightCol.removeAttribute('data-wa-tab-side-column');
+        rightCol.removeAttribute('data-wa-tab-spacer');
+        applyMainColumnFlexStyles(rightCol);
+
+        // Compensacion de seguridad pixel-exacta: si aun queda un desplazamiento interno
+        // entre outerChild y leftCol, ajustar left del host absoluto para arrancar a 0px del rail
+        if (navRailRightPx > 0 && outerChild) {
+            var leftAfter = Math.round(leftCol.getBoundingClientRect().left);
+            var extraShift = leftAfter - navRailRightPx;
+            if (extraShift > 1 && extraShift <= 160) {
+                var hostTarget = (targetNode && (window.getComputedStyle(targetNode).position === 'absolute' || window.getComputedStyle(targetNode).position === 'fixed'))
+                    ? targetNode
+                    : outerChild;
+                var hCs = window.getComputedStyle(hostTarget);
+                if (hCs.position === 'absolute' || hCs.position === 'fixed') {
+                    var curLeftVal = parseFloat(hCs.left) || 0;
+                    var fixedLeft = Math.round(curLeftVal - extraShift);
+                    hostTarget.style.setProperty('left', fixedLeft + 'px', 'important');
+                    hostTarget.style.setProperty('inset-inline-start', fixedLeft + 'px', 'important');
+                }
+            }
+        }
+    }
+
+    window.__waInspectLayout = function() {
+        var containers = resolveLayoutContainers();
+        var fc = (containers && containers.flexContainer) || cachedFlexContainer || document.querySelector('[data-wa-flex-container="true"]');
+        var side = document.getElementById('side');
+        var mainEl = document.getElementById('main');
+        var childrenReport = [];
+        if (fc) {
+            for (var i = 0; i < fc.children.length; i++) {
+                var ch = fc.children[i];
+                var r = ch.getBoundingClientRect();
+                var cs = window.getComputedStyle(ch);
+                var split = splitMultiColumnWrapper(ch);
+                childrenReport.push({
+                    index: i,
+                    tag: ch.tagName ? ch.tagName.toLowerCase() : '',
+                    rect: {
+                        left: Math.round(r.left),
+                        top: Math.round(r.top),
+                        width: Math.round(r.width),
+                        height: Math.round(r.height)
+                    },
+                    position: cs.position,
+                    display: cs.display,
+                    flexDirection: cs.flexDirection,
+                    containsSide: !!(side && ch.contains(side)),
+                    containsMain: !!(mainEl && ch.contains(mainEl)),
+                    attrs: {
+                        navRail: ch.getAttribute('data-wa-nav-rail') || '',
+                        sideCol: ch.getAttribute('data-wa-side-column') || '',
+                        tabShell: ch.getAttribute('data-wa-tab-shell') || '',
+                        tabSideCol: ch.getAttribute('data-wa-tab-side-column') || '',
+                        leftDrawer: ch.getAttribute('data-wa-left-drawer') || '',
+                        mainCol: ch.getAttribute('data-wa-main-column') || '',
+                        rightCol: ch.getAttribute('data-wa-right-column') || '',
+                        auxEmpty: ch.getAttribute('data-wa-aux-empty') || ''
+                    },
+                    hasMultiColSplit: !!split
+                });
+            }
+        }
+        return {
+            sideMounted: !!side,
+            mainMounted: !!mainEl,
+            compact: isCompactActive(),
+            sidebarWidthVar: document.documentElement.style.getPropertyValue('--wa-sidebar-width'),
+            tabSidebarWidthVar: document.documentElement.style.getPropertyValue('--wa-tab-sidebar-width'),
+            flexChildren: childrenReport
+        };
+    };
+
+    function applyMainColumnFlexStyles(el) {
+        if (!el) return;
+        el.removeAttribute('data-wa-side-column');
+        el.removeAttribute('data-wa-left-drawer');
+        el.removeAttribute('data-wa-right-column');
+        el.removeAttribute('data-wa-aux-empty');
+        clearAuxInlineStyles(el);
+        el.setAttribute('data-wa-main-column', 'true');
+        el.style.setProperty('flex', '1 1 0%', 'important');
+        el.style.setProperty('flex-grow', '1', 'important');
+        el.style.setProperty('flex-shrink', '1', 'important');
+        el.style.setProperty('min-width', '0', 'important');
+        el.style.setProperty('width', 'auto', 'important');
+        el.style.setProperty('max-width', 'none', 'important');
+    }
+
+    function applyWrapperPassThroughStyles(el) {
+        if (!el) return;
+        el.removeAttribute('data-wa-side-column');
+        el.removeAttribute('data-wa-left-drawer');
+        el.removeAttribute('data-wa-right-column');
+        el.removeAttribute('data-wa-aux-empty');
+        clearAuxInlineStyles(el);
+        el.setAttribute('data-wa-main-column', 'true');
+        el.style.setProperty('flex', '1 1 0%', 'important');
+        el.style.setProperty('flex-grow', '1', 'important');
+        el.style.setProperty('flex-shrink', '1', 'important');
+        el.style.setProperty('min-width', '0', 'important');
+        el.style.setProperty('width', 'auto', 'important');
+        el.style.setProperty('max-width', 'none', 'important');
+        el.style.setProperty('display', 'flex', 'important');
+        el.style.setProperty('flex-direction', 'row', 'important');
+    }
+
+    function resolveLayoutContainers() {
+        var side = document.querySelector('#side');
+        var mainEl = document.querySelector('#main');
+
+        if (!side) {
+            if (cachedFlexContainer && cachedFlexContainer.isConnected) {
+                resetHorizontalScrollLock(cachedFlexContainer);
+                var navRail = cachedFlexContainer.querySelector(':scope > [data-wa-nav-rail="true"], :scope > header');
+                var fallbackSideCol = null;
+                var fallbackMainCol = null;
+
+                // Auditar los hijos visibles de cachedFlexContainer despues del rail de navegacion
+                var flexChildren = cachedFlexContainer.children;
+                var contentSiblings = [];
+                for (var fc = 0; fc < flexChildren.length; fc++) {
+                    var fChild = flexChildren[fc];
+                    if (fChild === navRail || fChild.tagName === 'HEADER' || fChild.getAttribute('data-wa-nav-rail') === 'true') continue;
+                    var fRect = fChild.getBoundingClientRect();
+                    if (fRect.width > 0 && fRect.width <= 96 && !fChild.querySelector('section, [role="region"], [role="heading"], h1, h2, input, [role="textbox"], [role="row"], [role="listitem"]')) {
+                        continue;
+                    }
+                    if (!fChild.querySelector('header, section, [data-animate-drawer-left="true"], [data-animate-drawer-right="true"]') &&
+                        (fChild.matches('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') ||
+                         fChild.querySelector('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') !== null)) {
+                        continue;
+                    }
+                    var hasChildContent = fChild.children.length > 0 &&
+                        (fChild.querySelector('header, section, [role="region"], [role="heading"], [data-animate-drawer-left="true"], [data-animate-drawer-right="true"], button, [role="button"], svg') !== null ||
+                         (fChild.innerText || '').trim().length > 0);
+                    if (!hasChildContent) continue;
+                    contentSiblings.push(fChild);
+                }
+
+                if (contentSiblings.length >= 1) {
+                    var firstCand = contentSiblings[0];
+                    // Caso Layout A: firstCand es un wrapper unico que contiene adentro 2+ columnas (lista izquierda + panel central/derecho)
+                    var splitInfo = splitMultiColumnWrapper(firstCand);
+                    if (splitInfo) {
+                        applyWrapperPassThroughStyles(splitInfo.wrapper);
+                        splitInfo.wrapper.setAttribute('data-wa-tab-shell', 'true');
+                        if (splitInfo.innerHost !== splitInfo.wrapper) {
+                            applyWrapperPassThroughStyles(splitInfo.innerHost);
+                            splitInfo.innerHost.setAttribute('data-wa-tab-shell', 'true');
+                        }
+                        fallbackSideCol = splitInfo.leftCol;
+                        fallbackSideCol.removeAttribute('data-wa-main-column');
+                        fallbackSideCol.removeAttribute('data-wa-aux-empty');
+                        fallbackSideCol.setAttribute('data-wa-tab-side-column', 'true');
+                        if (!isCompactActive()) {
+                            fallbackSideCol.setAttribute('data-wa-side-column', 'true');
+                        } else {
+                            fallbackSideCol.removeAttribute('data-wa-side-column');
+                        }
+
+                        fallbackMainCol = splitInfo.rightCol;
+                        applyMainColumnFlexStyles(fallbackMainCol);
+                    } else {
+                        // Caso Layout B: firstCand es exclusivamente la columna lateral izquierda
+                        fallbackSideCol = firstCand;
+                        if (fallbackSideCol.hasAttribute('data-wa-main-column')) {
+                            fallbackSideCol.removeAttribute('data-wa-main-column');
+                        }
+                        fallbackSideCol.setAttribute('data-wa-tab-side-column', 'true');
+                        if (!isCompactActive()) {
+                            fallbackSideCol.setAttribute('data-wa-side-column', 'true');
+                        } else {
+                            fallbackSideCol.removeAttribute('data-wa-side-column');
+                        }
+
+                        // Buscar el siguiente hermano que sea el panel central/derecho (no un sub-drawer izquierdo ni drawer derecho)
+                        for (var csIdx = 1; csIdx < contentSiblings.length; csIdx++) {
+                            var candMain = contentSiblings[csIdx];
+                            var isExplicitLeftDrawer = candMain.querySelector('[data-animate-drawer-left="true"]') !== null &&
+                                                       candMain.querySelector('[data-animate-drawer-right="true"]') === null &&
+                                                       candMain.children.length === 1;
+                            if (!isExplicitLeftDrawer) {
+                                fallbackMainCol = candMain;
+                                applyMainColumnFlexStyles(fallbackMainCol);
+                                break;
+                            }
+                        }
+                    }
+                }
+
+                if (fallbackSideCol) {
+                    cachedSideColumn = fallbackSideCol;
+                }
+                if (fallbackMainCol) {
+                    cachedMainColumn = fallbackMainCol;
+                }
+                return {
+                    side: fallbackSideCol,
+                    sideColumn: fallbackSideCol,
+                    mainColumn: fallbackMainCol,
+                    flexContainer: cachedFlexContainer
+                };
+            }
+            return null;
+        }
+
+        // Si #side volvio a montarse, limpiar atributos residuales de wrappers de otras pestanas
+        // sin tocar las columnas activas de un Tab Shell
+        if (cachedFlexContainer && cachedFlexContainer.isConnected) {
+            var oldSideCols = cachedFlexContainer.querySelectorAll('[data-wa-side-column="true"]');
+            for (var os = 0; os < oldSideCols.length; os++) {
+                if (oldSideCols[os] !== side && !oldSideCols[os].contains(side)) {
+                    if (oldSideCols[os].hasAttribute('data-wa-tab-side-column') ||
+                        oldSideCols[os].closest('[data-wa-tab-shell="true"]')) {
+                        continue;
+                    }
+                    oldSideCols[os].removeAttribute('data-wa-side-column');
+                    clearAuxInlineStyles(oldSideCols[os]);
+                }
+            }
+            var oldMainCols = cachedFlexContainer.querySelectorAll('[data-wa-main-column="true"]');
+            for (var om = 0; om < oldMainCols.length; om++) {
+                if (!mainEl || (oldMainCols[om] !== mainEl && !oldMainCols[om].contains(mainEl))) {
+                    if (oldMainCols[om].closest('[data-wa-tab-shell="true"]')) {
+                        continue;
+                    }
+                    if (!mainEl && oldMainCols[om] === cachedMainColumn) {
+                        continue;
+                    }
+                    oldMainCols[om].removeAttribute('data-wa-main-column');
+                    clearAuxInlineStyles(oldMainCols[om]);
+                }
+            }
+        }
+
+        var isCacheValid = cachedSideColumn && cachedSideColumn.isConnected &&
+                           cachedFlexContainer && cachedFlexContainer.isConnected &&
+                           cachedSideColumn.parentElement === cachedFlexContainer &&
+                           (!mainEl || (cachedMainColumn && cachedMainColumn.isConnected && cachedMainColumn.contains(mainEl)));
+
+        if (isCacheValid) {
+            resetHorizontalScrollLock(cachedFlexContainer);
+            return {
+                side: side,
+                sideColumn: cachedSideColumn,
+                mainColumn: cachedMainColumn,
+                flexContainer: cachedFlexContainer
+            };
+        }
+
+        var sideCol = side;
+        var mainCol = null;
+        var container = null;
+
+        var curr = side;
+        while (curr && curr !== document.body && curr !== document.documentElement) {
+            var p = curr.parentElement;
+            if (!p) break;
+
+            var isMainWrapper = p.classList.contains('two') || 
+                                p.classList.contains('three') || 
+                                p.classList.contains('app-wrapper-web') ||
+                                p.id === 'app' ||
+                                (p.parentElement && p.parentElement.id === 'app');
+
+            var pStyle = window.getComputedStyle(p);
+            var isFlexRow = pStyle.display.indexOf('flex') !== -1 && 
+                            (pStyle.flexDirection === 'row' || pStyle.flexDirection === '');
+            var isGrid = pStyle.display.indexOf('grid') !== -1;
+
+            if (isFlexRow || isGrid || isMainWrapper) {
+                var mainEl = document.querySelector('#main');
+                if (mainEl && p.contains(mainEl) && curr !== mainEl) {
+                    container = p;
+                    sideCol = curr;
+
+                    var m = mainEl;
+                    while (m && m.parentElement !== container) {
+                        m = m.parentElement;
+                    }
+                    mainCol = m;
+                    break;
+                } else if (!mainEl && curr.nextElementSibling) {
+                    container = p;
+                    sideCol = curr;
+                    mainCol = curr.nextElementSibling;
+                    break;
+                }
+            }
+            curr = p;
+        }
+
+        if (sideCol) {
+            cachedSideColumn = sideCol;
+            sideCol.setAttribute('data-wa-side-column', 'true');
+        }
+        if (mainCol) {
+            cachedMainColumn = mainCol;
+            mainCol.setAttribute('data-wa-main-column', 'true');
+        }
+        if (container) {
+            cachedFlexContainer = container;
+            container.setAttribute('data-wa-flex-container', 'true');
+            resetHorizontalScrollLock(container);
+        }
+
+        return {
+            side: side,
+            sideColumn: sideCol,
+            mainColumn: mainCol,
+            flexContainer: container
+        };
+    }
+
+    function getMaxRightWidth() {
+        var sideWidth = 70;
+        if (!isCompactActive()) {
+            var containers = resolveLayoutContainers();
+            var sideCol = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
+            var rectW = sideCol ? Math.round(sideCol.getBoundingClientRect().width) : 0;
+            sideWidth = rectW > 0 ? rectW : getSavedWidth();
+        }
+        return Math.max(MIN_RIGHT_WIDTH, Math.min(Math.floor(window.innerWidth * 0.5), window.innerWidth - sideWidth - 260));
+    }
+
+    function getSavedRightWidth() {
+        var saved = localStorage.getItem(STORAGE_KEY_RIGHT_WIDTH);
+        var parsed = parseInt(saved, 10);
+        var base = (isNaN(parsed) || parsed < MIN_RIGHT_WIDTH) ? DEFAULT_RIGHT_WIDTH : parsed;
+        var maxRight = getMaxRightWidth();
+        return Math.max(MIN_RIGHT_WIDTH, Math.min(base, maxRight));
+    }
+
+    function applyRightColumnInlineWidth(rightCol, widthPx) {
+        if (!rightCol) return;
+        rightCol.style.setProperty('flex', '0 0 ' + widthPx + 'px', 'important');
+        rightCol.style.setProperty('flex-basis', widthPx + 'px', 'important');
+        rightCol.style.setProperty('flex-grow', '0', 'important');
+        rightCol.style.setProperty('flex-shrink', '0', 'important');
+        rightCol.style.setProperty('width', widthPx + 'px', 'important');
+        rightCol.style.setProperty('min-width', widthPx + 'px', 'important');
+        rightCol.style.setProperty('max-width', widthPx + 'px', 'important');
+        rightCol.style.setProperty('overflow-x', 'hidden', 'important');
+        rightCol.style.setProperty('border-left', '1px solid rgba(134, 150, 160, 0.22)', 'important');
+    }
+
+    function setRightPanelWidth(width, persist) {
+        var maxRight = getMaxRightWidth();
+        var numericWidth = (typeof width === 'number' && !isNaN(width)) ? width : DEFAULT_RIGHT_WIDTH;
+        var clamped = Math.max(MIN_RIGHT_WIDTH, Math.min(Math.round(numericWidth), maxRight));
+
+        document.documentElement.style.setProperty('--wa-right-panel-width', clamped + 'px');
+
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (rightCol) {
+            applyRightColumnInlineWidth(rightCol, clamped);
+        }
+
+        if (persist) {
+            localStorage.setItem(STORAGE_KEY_RIGHT_WIDTH, clamped.toString());
+        }
+
+        updateRightResizerPosition();
+        scheduleMainScaleUpdate();
+    }
+
+    function clearAuxInlineStyles(el) {
+        if (!el) return;
+        el.style.removeProperty('position');
+        el.style.removeProperty('left');
+        el.style.removeProperty('inset-inline-start');
+        el.style.removeProperty('right');
+        el.style.removeProperty('inset-inline-end');
+        el.style.removeProperty('top');
+        el.style.removeProperty('bottom');
+        el.style.removeProperty('z-index');
+        el.style.removeProperty('display');
+        el.style.removeProperty('flex-direction');
+        el.style.removeProperty('justify-content');
+        el.style.removeProperty('gap');
+        el.style.removeProperty('column-gap');
+        el.style.removeProperty('flex');
+        el.style.removeProperty('flex-basis');
+        el.style.removeProperty('flex-grow');
+        el.style.removeProperty('flex-shrink');
+        el.style.removeProperty('width');
+        el.style.removeProperty('min-width');
+        el.style.removeProperty('max-width');
+        el.style.removeProperty('padding-left');
+        el.style.removeProperty('padding-inline-start');
+        el.style.removeProperty('margin-left');
+        el.style.removeProperty('margin-inline-start');
+        el.style.removeProperty('transform');
+        el.style.removeProperty('overflow');
+        el.style.removeProperty('overflow-x');
+        el.style.removeProperty('border');
+        el.style.removeProperty('border-left');
+        el.style.removeProperty('border-right');
+        el.style.removeProperty('background-color');
+        el.style.removeProperty('pointer-events');
+    }
+
+    function syncAuxDrawers(container, sideCol, mainCol) {
+        if (!container) return;
+        resetHorizontalScrollLock(container);
+        var side = document.querySelector('#side');
+        var mainEl = document.querySelector('#main');
+        var navRailEl = container.querySelector(':scope > [data-wa-nav-rail="true"]') || container.querySelector(':scope > header');
+        if (navRailEl && !navRailEl.hasAttribute('data-wa-nav-rail')) {
+            navRailEl.setAttribute('data-wa-nav-rail', 'true');
+        }
+        var navRailRect = navRailEl ? navRailEl.getBoundingClientRect() : null;
+        var sideRect = sideCol ? sideCol.getBoundingClientRect() : null;
+        var effectiveSavedW = (currentSidebarWidth && currentSidebarWidth >= MIN_WIDTH) ? currentSidebarWidth : getSavedWidth();
+        var targetSideW = isCompactActive()
+            ? effectiveSavedW
+            : (effectiveSavedW || Math.round((sideRect && sideRect.width > 0 ? sideRect.width : getSavedWidth())));
+        document.documentElement.style.setProperty('--wa-tab-sidebar-width', targetSideW + 'px');
+        var hasRightCol = false;
+        var activeLeftFlowOwner = (sideCol && sideCol.getBoundingClientRect().width > 0) ? sideCol : null;
+        var children = container.children;
+
+        function clearStaleInnerDrawers(el) {
+            var stale = el.querySelectorAll('[data-wa-left-drawer="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"], [data-wa-tab-spacer="true"]');
+            for (var k = 0; k < stale.length; k++) {
+                stale[k].removeAttribute('data-wa-left-drawer');
+                stale[k].removeAttribute('data-wa-tab-shell');
+                stale[k].removeAttribute('data-wa-tab-side-column');
+                stale[k].removeAttribute('data-wa-tab-spacer');
+                clearAuxInlineStyles(stale[k]);
+            }
+        }
+
+        for (var i = 0; i < children.length; i++) {
+            var child = children[i];
+            if (child === sideCol || child === mainCol ||
+                (side && child.contains(side)) || (mainEl && child.contains(mainEl)) ||
+                (sideCol && child.contains(sideCol)) || (mainCol && child.contains(mainCol))) {
+                continue;
+            }
+
+            var isStandaloneToast = child.tagName !== 'HEADER' && !child.hasAttribute('data-wa-nav-rail') &&
+                                    !child.querySelector('header, section, [data-animate-drawer-left="true"], [data-animate-drawer-right="true"]') &&
+                                    (child.matches('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') ||
+                                     child.querySelector('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') !== null);
+            if (isStandaloneToast) {
+                if (child.hasAttribute('data-wa-left-drawer') || child.hasAttribute('data-wa-right-column') || child.hasAttribute('data-wa-aux-empty') || child.hasAttribute('data-wa-tab-shell')) {
+                    clearAuxInlineStyles(child);
+                }
+                child.removeAttribute('data-wa-left-drawer');
+                child.removeAttribute('data-wa-right-column');
+                child.removeAttribute('data-wa-aux-empty');
+                child.removeAttribute('data-wa-tab-shell');
+                clearStaleInnerDrawers(child);
+                continue;
+            }
+
+            var hasRealContent = child.children.length > 0 &&
+                                 (child.querySelector('header, section, [role="region"], [role="heading"], [data-animate-drawer-left="true"], [data-animate-drawer-right="true"], button, [role="button"], svg') !== null ||
+                                  (child.innerText || '').trim().length > 0);
+            var isAfterMain = mainCol ? !!(mainCol.compareDocumentPosition(child) & Node.DOCUMENT_POSITION_FOLLOWING) : false;
+            var hasExplicitLeftDrawer = child.querySelector('[data-animate-drawer-left="true"]') !== null &&
+                                        child.querySelector('[data-animate-drawer-right="true"]') === null;
+            if (hasExplicitLeftDrawer || child.hasAttribute('data-wa-tab-shell')) {
+                isAfterMain = false;
+            } else if (isAfterMain && mainCol) {
+                var cR = child.getBoundingClientRect();
+                var mR = mainCol.getBoundingClientRect();
+                if (cR.width > 0 && mR.width > 0 && cR.left < mR.left + 20) {
+                    isAfterMain = false;
+                } else if (mR.width === 0 && !child.querySelector('[data-animate-drawer-right="true"]')) {
+                    if (splitMultiColumnWrapper(child) || (child.firstElementChild && splitMultiColumnWrapper(child.firstElementChild))) {
+                        isAfterMain = false;
+                    }
+                }
+            }
+
+            if (!hasRealContent && child.getAttribute('data-wa-right-column') === 'true' && isRightDragging) {
+                hasRightCol = true;
+                continue;
+            }
+
+            if (!hasRealContent) {
+                var isSidebarAnim = !!(document.body && document.body.classList.contains('wa-sidebar-animating'));
+                child.removeAttribute('data-wa-left-drawer');
+                child.removeAttribute('data-wa-right-column');
+                child.removeAttribute('data-wa-main-column');
+                child.removeAttribute('data-wa-tab-shell');
+                clearStaleInnerDrawers(child);
+                clearAuxInlineStyles(child);
+
+                // Limpiar atributos/estilos residuales de Tab Shell en hijos cuando vuelve a quedar vacio en Chats
+                var staleTabCols = child.querySelectorAll('[data-wa-side-column="true"], [data-wa-main-column="true"]');
+                for (var stc = 0; stc < staleTabCols.length; stc++) {
+                    staleTabCols[stc].removeAttribute('data-wa-side-column');
+                    staleTabCols[stc].removeAttribute('data-wa-main-column');
+                    clearAuxInlineStyles(staleTabCols[stc]);
+                }
+
+                // Preservar el contenedor nativo de WhatsApp (CH[2]) en su geometria nativa (left: 0; width: 100%; z-index: auto):
+                // sus dos hijos directos dibujan los bordes verticales nativos izquierdo (junto al rail) y derecho (junto a #main)
+                var hasNativeRailSeam = false;
+                if (!isAfterMain && child.children.length > 0) {
+                    var chPosEmpty = window.getComputedStyle(child).position;
+                    if (chPosEmpty === 'absolute' || chPosEmpty === 'fixed') {
+                        var seamScan = child.firstElementChild;
+                        for (var sDepth = 0; sDepth < 3 && seamScan; sDepth++) {
+                            var sScanCs = window.getComputedStyle(seamScan);
+                            if ((parseFloat(sScanCs.borderLeftWidth) >= 0.5 && sScanCs.borderLeftStyle !== 'none') ||
+                                (parseFloat(sScanCs.borderRightWidth) >= 0.5 && sScanCs.borderRightStyle !== 'none')) {
+                                hasNativeRailSeam = true;
+                                break;
+                            }
+                            seamScan = seamScan.firstElementChild;
+                        }
+                    }
+                }
+                if (hasNativeRailSeam) {
+                    child.removeAttribute('data-wa-aux-empty');
+                    child.setAttribute('data-wa-rail-seam-host', 'true');
+                    if (!isSidebarAnim) {
+                        for (var scIdx = 0; scIdx < child.children.length; scIdx++) {
+                            clearAuxInlineStyles(child.children[scIdx]);
+                        }
+                    }
+                    continue;
+                }
+
+                child.removeAttribute('data-wa-rail-seam-host');
+                child.setAttribute('data-wa-aux-empty', 'true');
+                child.style.setProperty('flex', '0 0 0px', 'important');
+                child.style.setProperty('flex-grow', '0', 'important');
+                child.style.setProperty('flex-shrink', '0', 'important');
+                child.style.setProperty('width', '0px', 'important');
+                child.style.setProperty('min-width', '0px', 'important');
+                child.style.setProperty('max-width', '0px', 'important');
+                child.style.setProperty('border', 'none', 'important');
+                child.style.setProperty('overflow', 'hidden', 'important');
+            } else if (!isAfterMain) {
+                if (child.hasAttribute('data-wa-aux-empty') || child.hasAttribute('data-wa-rail-seam-host')) {
+                    if (child.hasAttribute('data-wa-rail-seam-host') && child.firstElementChild) {
+                        clearAuxInlineStyles(child.firstElementChild);
+                    }
+                    clearAuxInlineStyles(child);
+                    child.removeAttribute('data-wa-aux-empty');
+                    child.removeAttribute('data-wa-rail-seam-host');
+                }
+                var childRect = child.getBoundingClientRect();
+                var isNavRail = (child.tagName === 'HEADER') ||
+                                (child.getAttribute('data-wa-nav-rail') === 'true' &&
+                                 childRect.width > 0 && childRect.width <= 96 &&
+                                 !child.querySelector('[data-animate-drawer-left="true"], section, [role="region"], [role="heading"], h1, h2, input, [role="textbox"], [role="row"], [role="listitem"], [role="grid"]')) ||
+                                (sideCol &&
+                                 !!(child.compareDocumentPosition(sideCol) & Node.DOCUMENT_POSITION_FOLLOWING) &&
+                                 !child.hasAttribute('data-wa-left-drawer') &&
+                                 !child.querySelector('[data-animate-drawer-left="true"], section, [role="region"], [role="heading"], h1, h2, input, [role="textbox"], [role="row"], [role="listitem"], [role="grid"]') &&
+                                 childRect.width > 0 && childRect.width <= 96 &&
+                                 ((sideRect && sideRect.width > 0 && childRect.right <= sideRect.left + 2) ||
+                                  ((!sideRect || sideRect.width === 0) && childRect.left <= 4)));
+                if (isNavRail) {
+                    if (child.hasAttribute('data-wa-left-drawer') || child.hasAttribute('data-wa-right-column') || child.hasAttribute('data-wa-tab-shell')) {
+                        clearAuxInlineStyles(child);
+                    }
+                    child.removeAttribute('data-wa-left-drawer');
+                    child.removeAttribute('data-wa-right-column');
+                    child.removeAttribute('data-wa-tab-shell');
+                    child.setAttribute('data-wa-nav-rail', 'true');
+                    navRailEl = child;
+                    navRailRect = childRect;
+                    clearStaleInnerDrawers(child);
+                    continue;
+                }
+                if (child.hasAttribute('data-wa-nav-rail')) {
+                    child.removeAttribute('data-wa-nav-rail');
+                }
+
+                var childPos = window.getComputedStyle(child).position;
+                var absOverlay = null;
+                if (childPos !== 'absolute' && childPos !== 'fixed') {
+                    var innerCand = child.querySelector('[data-animate-drawer-left="true"]') || child.firstElementChild;
+                    if (innerCand) {
+                        var innerPos = window.getComputedStyle(innerCand).position;
+                        if (innerPos === 'absolute' || innerPos === 'fixed') {
+                            absOverlay = innerCand;
+                        }
+                    }
+                }
+
+                var navRailRightPx = (navRailRect && navRailRect.width > 0)
+                    ? Math.round(navRailRect.right)
+                    : ((sideRect && sideRect.width > 0) ? Math.round(sideRect.left) : 0);
+
+                var leftAnchorPx = (sideRect && sideRect.width > 0)
+                    ? Math.round(sideRect.left)
+                    : navRailRightPx;
+
+                // Detectar Tab Shell de 2 columnas (Estados, Canales, Comunidades, Configuracion, Perfil)
+                // ANTES de aplicar data-wa-left-drawer (tanto si #side sigue montado en el DOM como si no!)
+                var tabSplit = splitMultiColumnWrapper(absOverlay || child);
+                if (!tabSplit && absOverlay) {
+                    tabSplit = splitMultiColumnWrapper(child);
+                }
+                if (tabSplit) {
+                    applyTabShellLayout(child, absOverlay || child, tabSplit, navRailRightPx, targetSideW);
+                    continue;
+                }
+
+                // Si antes fue un tab-shell pero ahora es un sub-drawer de 1 sola columna, limpiar atributos de tab-shell
+                if (child.hasAttribute('data-wa-tab-shell') || child.querySelector('[data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]')) {
+                    child.removeAttribute('data-wa-tab-shell');
+                    clearStaleInnerDrawers(child);
+                }
+
+                // Si #main no esta montado y este hijo viene despues de activeLeftFlowOwner sin ser un drawer izquierdo explicito,
+                // es el panel central/derecho principal de la pestana (Configuracion, Estados, Canales, Comunidades, Perfil)
+                if (!mainEl && !mainCol && activeLeftFlowOwner && activeLeftFlowOwner !== child && !hasExplicitLeftDrawer) {
+                    mainCol = child;
+                    cachedMainColumn = child;
+                    applyMainColumnFlexStyles(child);
+                    continue;
+                }
+
+                if (absOverlay) {
+                    clearAuxInlineStyles(child);
+                    child.removeAttribute('data-wa-left-drawer');
+                    child.removeAttribute('data-wa-right-column');
+                    child.style.setProperty('flex', '0 0 0px', 'important');
+                    child.style.setProperty('width', '0px', 'important');
+                    child.style.setProperty('min-width', '0px', 'important');
+                    child.style.setProperty('overflow', 'visible', 'important');
+                    var absRect = absOverlay.getBoundingClientRect();
+                    var absW = targetSideW;
+                    if (leftAnchorPx > 0 && absRect.width > 0 && absRect.left < leftAnchorPx) {
+                        absW = Math.max(targetSideW, Math.round((leftAnchorPx + targetSideW) - absRect.left));
+                    }
+                    absOverlay.style.setProperty('width', absW + 'px', 'important');
+                    absOverlay.style.setProperty('min-width', absW + 'px', 'important');
+                    absOverlay.style.setProperty('max-width', absW + 'px', 'important');
+                    absOverlay.style.setProperty('overflow', 'hidden', 'important');
+                    absOverlay.style.setProperty('border-right', '1px solid rgba(134, 150, 160, 0.22)', 'important');
+                    absOverlay.style.setProperty('background-color', 'var(--panel-background-deep, var(--background-default, #111b21))', 'important');
+                    absOverlay.setAttribute('data-wa-left-drawer', 'true');
+                    continue;
+                }
+
+                child.removeAttribute('data-wa-right-column');
+                child.removeAttribute('data-wa-main-column');
+                child.setAttribute('data-wa-left-drawer', 'true');
+
+                var drawerW = targetSideW;
+                if (leftAnchorPx > 0 && childRect.width > 0 && childRect.left < leftAnchorPx) {
+                    var sideRight = leftAnchorPx + targetSideW;
+                    drawerW = Math.max(targetSideW, Math.round(sideRight - childRect.left));
+                }
+
+                // Superponer pegado al rail (0px gap) si ya es position: absolute/fixed o si es un sub-drawer izquierdo real
+                if (childPos === 'absolute' || childPos === 'fixed') {
+                    var absDrawerLeft = navRailRightPx;
+                    if (childPos === 'absolute') {
+                        var cdOp = child.offsetParent;
+                        var cdOpLeft = (cdOp && cdOp !== document.body && cdOp !== document.documentElement)
+                            ? Math.round(cdOp.getBoundingClientRect().left)
+                            : 0;
+                        absDrawerLeft = Math.max(0, navRailRightPx - cdOpLeft);
+                    }
+                    child.style.setProperty('left', absDrawerLeft + 'px', 'important');
+                    child.style.setProperty('inset-inline-start', absDrawerLeft + 'px', 'important');
+                    child.style.setProperty('top', '0px', 'important');
+                    child.style.setProperty('bottom', '0px', 'important');
+                    child.style.setProperty('z-index', '250', 'important');
+                    child.style.setProperty('width', targetSideW + 'px', 'important');
+                    child.style.setProperty('min-width', targetSideW + 'px', 'important');
+                    child.style.setProperty('max-width', targetSideW + 'px', 'important');
+                    child.style.setProperty('overflow', 'hidden', 'important');
+                    child.style.setProperty('border-right', '1px solid rgba(134, 150, 160, 0.22)', 'important');
+                    child.style.setProperty('background-color', 'var(--panel-background-deep, var(--background-default, #111b21))', 'important');
+                    continue;
+                }
+
+                if (activeLeftFlowOwner && activeLeftFlowOwner !== child && hasExplicitLeftDrawer) {
+                    child.style.setProperty('position', 'absolute', 'important');
+                    child.style.setProperty('top', '0px', 'important');
+                    child.style.setProperty('bottom', '0px', 'important');
+                    child.style.setProperty('left', navRailRightPx + 'px', 'important');
+                    child.style.setProperty('inset-inline-start', navRailRightPx + 'px', 'important');
+                    child.style.setProperty('height', '100%', 'important');
+                    child.style.setProperty('z-index', '15', 'important');
+                    child.style.setProperty('width', targetSideW + 'px', 'important');
+                    child.style.setProperty('min-width', targetSideW + 'px', 'important');
+                    child.style.setProperty('max-width', targetSideW + 'px', 'important');
+                    child.style.setProperty('overflow', 'hidden', 'important');
+                    child.style.setProperty('border-right', '1px solid rgba(134, 150, 160, 0.22)', 'important');
+                    child.style.setProperty('background-color', 'var(--panel-background-deep, var(--background-default, #111b21))', 'important');
+                    continue;
+                }
+
+                activeLeftFlowOwner = child;
+                child.style.removeProperty('position');
+                child.style.removeProperty('left');
+                child.style.removeProperty('top');
+                child.style.removeProperty('bottom');
+                child.style.removeProperty('z-index');
+                child.style.removeProperty('border');
+                child.style.removeProperty('border-left');
+                child.style.setProperty('flex', '0 0 ' + drawerW + 'px', 'important');
+                child.style.setProperty('flex-basis', drawerW + 'px', 'important');
+                child.style.setProperty('flex-grow', '0', 'important');
+                child.style.setProperty('flex-shrink', '0', 'important');
+                child.style.setProperty('width', drawerW + 'px', 'important');
+                child.style.setProperty('min-width', drawerW + 'px', 'important');
+                child.style.setProperty('max-width', drawerW + 'px', 'important');
+                child.style.setProperty('overflow', 'hidden', 'important');
+                child.style.setProperty('border-right', '1px solid rgba(134, 150, 160, 0.22)', 'important');
+                child.style.setProperty('background-color', 'var(--panel-background-deep, var(--background-default, #111b21))', 'important');
+            } else {
+                if (child.hasAttribute('data-wa-aux-empty')) {
+                    clearAuxInlineStyles(child);
+                    child.removeAttribute('data-wa-aux-empty');
+                }
+                hasRightCol = true;
+                child.removeAttribute('data-wa-left-drawer');
+                child.removeAttribute('data-wa-tab-shell');
+                clearStaleInnerDrawers(child);
+                child.setAttribute('data-wa-right-column', 'true');
+
+                if (!isRightDragging) {
+                    var rw = Math.max(MIN_RIGHT_WIDTH, Math.min(getSavedRightWidth(), getMaxRightWidth()));
+                    document.documentElement.style.setProperty('--wa-right-panel-width', rw + 'px');
+                    child.style.removeProperty('overflow');
+                    child.style.removeProperty('border');
+                    child.style.removeProperty('border-right');
+                    child.style.removeProperty('background-color');
+                    applyRightColumnInlineWidth(child, rw);
+                }
+            }
+        }
+
+        var leftDrawers = container.querySelectorAll('[data-animate-drawer-left="true"]');
+        for (var j = 0; j < leftDrawers.length; j++) {
+            var dl = leftDrawers[j];
+            if (dl.children.length === 0) continue;
+            // Si el drawer es o contiene un Tab Shell de 2 columnas (Estados/Canales/Comunidades/Configuracion/Perfil),
+            // NO aplastarlo a targetSideW!
+            if (dl.hasAttribute('data-wa-tab-shell') ||
+                dl.querySelector('[data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]')) {
+                continue;
+            }
+            var dlSplit = !dl.closest('[data-wa-tab-side-column="true"]') ? splitMultiColumnWrapper(dl) : null;
+            if (dlSplit) {
+                var navRightFallback = (navRailRect && navRailRect.width > 0) ? Math.round(navRailRect.right) : 0;
+                applyTabShellLayout(dl, dl, dlSplit, navRightFallback, targetSideW);
+                continue;
+            }
+            if (dl.hasAttribute('data-wa-left-drawer')) {
+                dl.style.setProperty('box-sizing', 'border-box', 'important');
+                continue;
+            }
+            var inLeftDrawer = !!dl.closest('[data-wa-left-drawer="true"]');
+            var inTabSideCol = !!dl.closest('[data-wa-tab-side-column="true"]');
+            var inSideCol = !!(sideCol && sideCol.contains(dl));
+            if (inLeftDrawer || inTabSideCol || (inSideCol && !isCompactActive())) {
+                var dlRect = dl.getBoundingClientRect();
+                if (sideRect && inSideCol && !isCompactActive() && dlRect.width > 0 && dlRect.left < sideRect.left - 1) {
+                    var dlW = Math.max(targetSideW, Math.round((sideRect.left + targetSideW) - dlRect.left));
+                    dl.style.setProperty('width', dlW + 'px', 'important');
+                    dl.style.setProperty('min-width', '0px', 'important');
+                    dl.style.setProperty('max-width', dlW + 'px', 'important');
+                } else {
+                    dl.style.setProperty('width', '100%', 'important');
+                    dl.style.setProperty('min-width', '0px', 'important');
+                    dl.style.setProperty('max-width', '100%', 'important');
+                }
+            } else {
+                dl.style.setProperty('width', targetSideW + 'px', 'important');
+                dl.style.setProperty('min-width', '0px', 'important');
+                dl.style.setProperty('max-width', targetSideW + 'px', 'important');
+                dl.style.setProperty('background-color', 'var(--panel-background-deep, var(--background-default, #111b21))', 'important');
+            }
+            dl.style.setProperty('overflow-x', 'clip', 'important');
+            dl.style.setProperty('box-sizing', 'border-box', 'important');
+        }
+
+        var activeTabShell = false;
+        var tabShells = container.querySelectorAll('[data-wa-tab-shell="true"]');
+        for (var tsIdx = 0; tsIdx < tabShells.length; tsIdx++) {
+            var tsEl = tabShells[tsIdx];
+            if (!tsEl.isConnected) continue;
+            var tsRect = tsEl.getBoundingClientRect();
+            var tsCs = window.getComputedStyle(tsEl);
+            if (tsRect.width > 0 && tsRect.height > 0 && tsCs.display !== 'none' && tsCs.visibility !== 'hidden') {
+                activeTabShell = true;
+                break;
+            }
+        }
+        if (!activeTabShell && !side) {
+            var tabSideCheck = container.querySelector('[data-wa-tab-side-column="true"]');
+            if (tabSideCheck && tabSideCheck.isConnected) {
+                var tscRect = tabSideCheck.getBoundingClientRect();
+                if (tscRect.width > 0 && tscRect.height > 0) {
+                    activeTabShell = true;
+                }
+            }
+        }
+
+        var activeLeftDrawer = false;
+        var activeLeftDrawers = container.querySelectorAll('[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"])');
+        for (var ldIdx = 0; ldIdx < activeLeftDrawers.length; ldIdx++) {
+            var ldEl = activeLeftDrawers[ldIdx];
+            if (!ldEl.isConnected) continue;
+            var ldRect = ldEl.getBoundingClientRect();
+            var ldCs = window.getComputedStyle(ldEl);
+            if (ldRect.width > 0 && ldRect.height > 0 && ldCs.display !== 'none' && ldCs.visibility !== 'hidden') {
+                activeLeftDrawer = true;
+                break;
+            }
+        }
+
+        var wasTabShellActive = !!(document.body && document.body.classList.contains('wa-tab-shell-active'));
+        var wasLeftDrawerActive = !!(document.body && document.body.classList.contains('wa-left-drawer-active'));
+        if (document.body) {
+            if (activeTabShell) {
+                document.body.classList.add('wa-tab-shell-active');
+            } else {
+                document.body.classList.remove('wa-tab-shell-active');
+            }
+            if (activeLeftDrawer) {
+                document.body.classList.add('wa-left-drawer-active');
+            } else {
+                document.body.classList.remove('wa-left-drawer-active');
+            }
+        }
+
+        var sideCoveredByTabShellHost = false;
+        for (var ci = 0; ci < children.length; ci++) {
+            var cChild = children[ci];
+            var isChatUnderlying = (side && (cChild === side || cChild.contains(side))) ||
+                                   (mainEl && (cChild === mainEl || cChild.contains(mainEl))) ||
+                                   (sideCol && cChild === sideCol && !cChild.hasAttribute('data-wa-tab-side-column')) ||
+                                   (mainCol && cChild === mainCol && !cChild.hasAttribute('data-wa-tab-shell') && !cChild.closest('[data-wa-tab-shell="true"]'));
+            if (!isChatUnderlying) {
+                if (cChild.hasAttribute('data-wa-chat-bg-hidden')) {
+                    cChild.removeAttribute('data-wa-chat-bg-hidden');
+                }
+                continue;
+            }
+            var hostsTabShell = cChild.hasAttribute('data-wa-tab-shell') || !!cChild.querySelector('[data-wa-tab-shell="true"]');
+            if (activeTabShell && !hostsTabShell) {
+                cChild.setAttribute('data-wa-chat-bg-hidden', 'true');
+            } else {
+                if (hostsTabShell && side && (cChild === side || cChild.contains(side))) {
+                    sideCoveredByTabShellHost = true;
+                }
+                if (cChild.hasAttribute('data-wa-chat-bg-hidden')) {
+                    cChild.removeAttribute('data-wa-chat-bg-hidden');
+                }
+            }
+        }
+        if (side) {
+            if (activeTabShell && sideCoveredByTabShellHost &&
+                !side.closest('[data-wa-tab-shell="true"]') &&
+                !side.querySelector('[data-wa-tab-shell="true"]')) {
+                side.setAttribute('data-wa-chat-bg-hidden', 'true');
+            } else if (side.hasAttribute('data-wa-chat-bg-hidden')) {
+                side.removeAttribute('data-wa-chat-bg-hidden');
+            }
+        }
+
+        if (hasRightCol) {
+            ensureRightResizer();
+        }
+        updateResizerPosition();
+        if (wasTabShellActive !== activeTabShell || wasLeftDrawerActive !== activeLeftDrawer) {
+            syncResizerOverlayState();
+        }
+    }
+
+    function setSidebarWidth(width, persist) {
+        var max = getMaxWidth();
+        var numericWidth = (typeof width === 'number' && !isNaN(width)) ? width : DEFAULT_WIDTH;
+        var clamped = Math.max(MIN_WIDTH, Math.min(Math.round(numericWidth), max));
+        currentSidebarWidth = clamped;
+
+        document.documentElement.style.setProperty('--wa-sidebar-width', clamped + 'px');
+        document.documentElement.style.setProperty('--wa-tab-sidebar-width', clamped + 'px');
+
+        // Actualizar cualquier sub-columna izquierda activa de pestanas no-Chat o drawers izquierdos
+        var tabSideCols = document.querySelectorAll('[data-wa-tab-side-column="true"], [data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"])');
+        for (var ts = 0; ts < tabSideCols.length; ts++) {
+            var tsc = tabSideCols[ts];
+            tsc.style.setProperty('flex', '0 0 ' + clamped + 'px', 'important');
+            tsc.style.setProperty('flex-basis', clamped + 'px', 'important');
+            tsc.style.setProperty('flex-grow', '0', 'important');
+            tsc.style.setProperty('flex-shrink', '0', 'important');
+            tsc.style.setProperty('width', clamped + 'px', 'important');
+            tsc.style.setProperty('min-width', clamped + 'px', 'important');
+            tsc.style.setProperty('max-width', clamped + 'px', 'important');
+        }
+
+        var didSyncAux = false;
+        var containers = resolveLayoutContainers();
+        if (containers && !isCompactActive()) {
+            var side = containers.side;
+            var sideCol = containers.sideColumn;
+            var mainCol = containers.mainColumn;
+
+            if (side) {
+                side.__waWidthApplied = true;
+            }
+
+            if (sideCol) {
+                sideCol.style.removeProperty('border-right');
+                sideCol.style.removeProperty('overflow');
+                sideCol.style.setProperty('width', clamped + 'px', 'important');
+                sideCol.style.setProperty('min-width', clamped + 'px', 'important');
+                sideCol.style.setProperty('max-width', clamped + 'px', 'important');
+                sideCol.style.setProperty('flex-basis', clamped + 'px', 'important');
+                sideCol.style.setProperty('flex-grow', '0', 'important');
+                sideCol.style.setProperty('flex-shrink', '0', 'important');
+            }
+
+            if (side && side !== sideCol) {
+                side.style.removeProperty('border-right');
+                side.style.removeProperty('overflow');
+                side.style.setProperty('width', '100%', 'important');
+                side.style.setProperty('min-width', '100%', 'important');
+                side.style.setProperty('max-width', '100%', 'important');
+                side.style.setProperty('flex-basis', '100%', 'important');
+                side.style.setProperty('flex-grow', '1', 'important');
+                side.style.setProperty('flex-shrink', '1', 'important');
+            } else if (side) {
+                side.style.removeProperty('border-right');
+                side.style.removeProperty('overflow');
+                side.style.setProperty('width', clamped + 'px', 'important');
+                side.style.setProperty('min-width', clamped + 'px', 'important');
+                side.style.setProperty('max-width', clamped + 'px', 'important');
+                side.style.setProperty('flex-basis', clamped + 'px', 'important');
+            }
+
+            if (mainCol) {
+                mainCol.style.setProperty('flex', '1 1 0%', 'important');
+                mainCol.style.setProperty('flex-grow', '1', 'important');
+                mainCol.style.setProperty('flex-shrink', '1', 'important');
+                mainCol.style.setProperty('min-width', '0', 'important');
+                mainCol.style.setProperty('width', 'auto', 'important');
+                mainCol.style.setProperty('max-width', 'none', 'important');
+            }
+
+            var mainEl = document.querySelector('#main');
+            if (mainEl && mainEl !== mainCol) {
+                mainEl.style.setProperty('width', '100%', 'important');
+                mainEl.style.setProperty('height', '100%', 'important');
+                mainEl.style.setProperty('min-width', '0', 'important');
+                mainEl.style.setProperty('flex', '1 1 auto', 'important');
+            }
+
+            syncAuxDrawers(containers.flexContainer, sideCol, mainCol);
+            didSyncAux = true;
+        }
+
+        if (persist) {
+            localStorage.setItem(STORAGE_KEY_WIDTH, clamped.toString());
+        }
+
+        if (!didSyncAux) {
+            updateResizerPosition();
+        }
+        scheduleMainScaleUpdate();
+    }
+
+    function resolveLeftResizeTarget() {
+        // 1. Priorizar la sub-columna izquierda visible de una pestana no-Chat activa ([data-wa-tab-side-column="true"])
+        var tabCols = document.querySelectorAll('[data-wa-tab-side-column="true"]');
+        for (var tc = tabCols.length - 1; tc >= 0; tc--) {
+            var tcEl = tabCols[tc];
+            if (!tcEl.isConnected) continue;
+            var tcRect = tcEl.getBoundingClientRect();
+            if (tcRect.width > 0 && tcRect.height > 0) {
+                return { element: tcEl, rect: tcRect };
+            }
+        }
+        // 2. Priorizar cualquier drawer izquierdo visible (p. ej. Configuracion/sub-drawers en modo compacto o normal)
+        var drawers = document.querySelectorAll('[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"])');
+        for (var di = drawers.length - 1; di >= 0; di--) {
+            var dEl = drawers[di];
+            if (!dEl.isConnected) continue;
+            var dRect = dEl.getBoundingClientRect();
+            if (dRect.width > 0 && dRect.height > 0) {
+                return { element: dEl, rect: dRect };
+            }
+        }
+        var containers = resolveLayoutContainers();
+        var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : document.querySelector('#side');
+        var rect = targetEl ? targetEl.getBoundingClientRect() : null;
+        if (!targetEl || !rect || rect.width === 0 || rect.height === 0) {
+            return null;
+        }
+        return { element: targetEl, rect: rect };
+    }
+
+    function updateLeftResizerPosition() {
+        if (!resizerElement) return;
+
+        var target = resolveLeftResizeTarget();
+        if (!target) {
+            resizerElement.style.display = 'none';
+            resizerElement.style.left = '-9999px';
+            return;
+        }
+        var isTabOrDrawerTarget = target.element.getAttribute('data-wa-tab-side-column') === 'true' ||
+                                  target.element.getAttribute('data-wa-left-drawer') === 'true';
+        if (isCompactActive() && !isTabOrDrawerTarget) {
+            resizerElement.style.display = 'none';
+            resizerElement.style.left = '-9999px';
+            return;
+        }
+
+        resizerElement.style.display = 'block';
+        resizerElement.style.top = target.rect.top + 'px';
+        resizerElement.style.height = target.rect.height + 'px';
+        resizerElement.style.left = target.rect.right + 'px';
+    }
+
+    function updateRightResizerPosition() {
+        if (!rightResizerElement) return;
+        if (isRightDragging) {
+            var dragCol = document.querySelector('[data-wa-right-column="true"]');
+            if (dragCol) {
+                var dRect = dragCol.getBoundingClientRect();
+                if (dRect.width > 0) {
+                    rightResizerElement.style.left = dRect.left + 'px';
+                }
+            }
+            return;
+        }
+
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (!rightCol) {
+            rightResizerElement.style.display = 'none';
+            rightResizerElement.style.left = '-9999px';
+            return;
+        }
+
+        var rRect = rightCol.getBoundingClientRect();
+        if (rRect.width <= 0 || rRect.height <= 0) {
+            rightResizerElement.style.display = 'none';
+            rightResizerElement.style.left = '-9999px';
+            return;
+        }
+
+        rightResizerElement.style.display = 'block';
+        rightResizerElement.style.top = rRect.top + 'px';
+        rightResizerElement.style.height = rRect.height + 'px';
+        rightResizerElement.style.left = rRect.left + 'px';
+    }
+
+    function updateResizerPosition() {
+        updateLeftResizerPosition();
+        updateRightResizerPosition();
+        scheduleMainScaleUpdate();
+    }
+
+    function onMouseDown(e) {
+        if (e.button !== 0) return;
+        var hasActiveTabOrDrawer = false;
+        var tabCols = document.querySelectorAll('[data-wa-tab-side-column="true"], [data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"])');
+        for (var tc = 0; tc < tabCols.length; tc++) {
+            var tcR = tabCols[tc].getBoundingClientRect();
+            if (tcR.width > 0 && tcR.height > 0) {
+                hasActiveTabOrDrawer = true;
+                break;
+            }
+        }
+        if (isCompactActive() && !hasActiveTabOrDrawer) return;
+        syncResizerOverlayState(e.clientX, e.clientY);
+        if (resizerElement && resizerElement.classList.contains('wa-resizer-disabled')) {
+            return;
+        }
+        e.preventDefault();
+
+        if (compactAnimTimer) {
+            clearTimeout(compactAnimTimer);
+            compactAnimTimer = null;
+        }
+        document.body.classList.remove('wa-sidebar-animating');
+        hideHoverTooltip();
+
+        isDragging = true;
+        if (resizerElement) {
+            resizerElement.classList.add('is-resizing');
+        }
+        document.documentElement.classList.add('wa-resizing-active');
+
+        window.addEventListener('mousemove', onMouseMove, { passive: false, capture: true });
+        window.addEventListener('mouseup', onMouseUp, { once: true, capture: true });
+    }
+
+    function onMouseMove(e) {
+        if (!isDragging) return;
+        e.preventDefault();
+        targetClientX = e.clientX;
+
+        if (!rafPending) {
+            rafPending = true;
+            window.requestAnimationFrame(function() {
+                rafPending = false;
+                if (!isDragging) return;
+
+                var target = resolveLeftResizeTarget();
+                if (!target) return;
+
+                var sideLeft = target.rect.left;
+                var calculatedWidth = targetClientX - sideLeft;
+
+                setSidebarWidth(calculatedWidth, false);
+            });
+        }
+    }
+
+    function onMouseUp(e) {
+        if (!isDragging) return;
+        isDragging = false;
+
+        if (resizerElement) {
+            resizerElement.classList.remove('is-resizing');
+        }
+        document.documentElement.classList.remove('wa-resizing-active');
+
+        window.removeEventListener('mousemove', onMouseMove, { capture: true });
+
+        var target = resolveLeftResizeTarget();
+        if (target) {
+            var currentWidth = Math.round(target.rect.width);
+            setSidebarWidth(currentWidth, true);
+        }
+    }
+
+    function onRightMouseDown(e) {
+        if (e.button !== 0) return;
+        syncResizerOverlayState(e.clientX, e.clientY);
+        if (rightResizerElement && rightResizerElement.classList.contains('wa-resizer-disabled')) {
+            return;
+        }
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (!rightCol) return;
+
+        hideHoverTooltip();
+        e.preventDefault();
+        isRightDragging = true;
+        if (rightResizerElement) {
+            rightResizerElement.classList.add('is-resizing');
+        }
+        document.documentElement.classList.add('wa-resizing-active');
+
+        window.addEventListener('mousemove', onRightMouseMove, { passive: false, capture: true });
+        window.addEventListener('mouseup', onRightMouseUp, { once: true, capture: true });
+    }
+
+    function onRightMouseMove(e) {
+        if (!isRightDragging) return;
+        e.preventDefault();
+        rightTargetClientX = e.clientX;
+
+        if (!rightRafPending) {
+            rightRafPending = true;
+            window.requestAnimationFrame(function() {
+                rightRafPending = false;
+                if (!isRightDragging) return;
+
+                var rightCol = document.querySelector('[data-wa-right-column="true"]');
+                if (!rightCol) return;
+
+                var rightEdge = rightCol.getBoundingClientRect().right;
+                var calculatedWidth = rightEdge - rightTargetClientX;
+                setRightPanelWidth(calculatedWidth, false);
+            });
+        }
+    }
+
+    function onRightMouseUp(e) {
+        if (!isRightDragging) return;
+        isRightDragging = false;
+
+        if (rightResizerElement) {
+            rightResizerElement.classList.remove('is-resizing');
+        }
+        document.documentElement.classList.remove('wa-resizing-active');
+
+        window.removeEventListener('mousemove', onRightMouseMove, { capture: true });
+
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (rightCol) {
+            var currentWidth = Math.round(rightCol.getBoundingClientRect().width);
+            setRightPanelWidth(currentWidth, true);
+        }
+    }
+
+    window.__waSetSidebarCompact = function(targetCompact) {
+        var currentlyCompact = isCompactActive();
+        if (targetCompact === currentlyCompact) return;
+
+        hideHoverTooltip();
+
+        var containers = resolveLayoutContainers();
+        var side = (containers && containers.side) ? containers.side : document.querySelector('#side');
+        var sideCol = (containers && containers.sideColumn) ? containers.sideColumn : side;
+        var mainCol = (containers && containers.mainColumn) ? containers.mainColumn : null;
+        var mainAppEl = document.querySelector('#main [role="application"]');
+
+        var navRail = document.querySelector('[data-wa-nav-rail="true"]') ||
+                      (containers && containers.flexContainer ? containers.flexContainer.querySelector(':scope > header') : null);
+        var topCollapsible = [];
+        if (side) {
+            for (var sc = 0; sc < side.children.length; sc++) {
+                var ch = side.children[sc];
+                if (ch.id === 'pane-side' || ch.querySelector('#pane-side')) continue;
+                if (ch.matches('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') ||
+                    ch.querySelector('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]')) {
+                    continue;
+                }
+                topCollapsible.push(ch);
+            }
+        }
+
+        if (compactAnimTimer) {
+            clearTimeout(compactAnimTimer);
+            compactAnimTimer = null;
+        }
+
+        // Fase 1: Agrupar todas las lecturas iniciales antes de cualquier escritura DOM
+        var flipPane = document.getElementById('pane-side');
+        var flipBeforeTop = flipPane ? flipPane.getBoundingClientRect().top : 0;
+        var navW = navRail ? Math.round(navRail.getBoundingClientRect().width) : 0;
+        var sideColW = sideCol ? Math.round(sideCol.getBoundingClientRect().width) : 0;
+        var tcHeights = [];
+        if (targetCompact) {
+            for (var tc0 = 0; tc0 < topCollapsible.length; tc0++) {
+                tcHeights.push(Math.round(topCollapsible[tc0].getBoundingClientRect().height));
+            }
+        }
+
+        // Fase 2: Agrupar escrituras de estado inicial
+        var railSeamHost = document.querySelector('[data-wa-rail-seam-host="true"]');
+        var railSeamFirst = railSeamHost ? railSeamHost.firstElementChild : null;
+        if (flipPane) {
+            flipPane.style.removeProperty('transition');
+            flipPane.style.removeProperty('transform');
+        }
+        if (sideCol) {
+            sideCol.style.setProperty('will-change', 'width', 'important');
+        }
+        if (navRail) {
+            navRail.style.setProperty('will-change', 'width', 'important');
+        }
+        if (railSeamFirst) {
+            railSeamFirst.style.setProperty('will-change', 'margin-inline-start, width', 'important');
+        }
+        if (mainAppEl) {
+            mainAppEl.style.setProperty('contain', 'layout style', 'important');
+        }
+
+        if (targetCompact) {
+            if (navRail) {
+                if (navW > 42) {
+                    navRail.__waNormalWidth = navW;
+                }
+                if (navW > 0) {
+                    navRail.style.setProperty('width', navW + 'px', 'important');
+                    navRail.style.setProperty('min-width', navW + 'px', 'important');
+                    navRail.style.setProperty('max-width', navW + 'px', 'important');
+                    navRail.style.setProperty('flex-basis', navW + 'px', 'important');
+                }
+            }
+            if (railSeamFirst) {
+                var seamStartMargin = (navW > 0) ? navW : 64;
+                var seamStartW = (sideColW > 0) ? sideColW : getSavedWidth();
+                railSeamFirst.style.setProperty('margin-inline-start', seamStartMargin + 'px', 'important');
+                railSeamFirst.style.setProperty('width', seamStartW + 'px', 'important');
+                railSeamFirst.style.setProperty('min-width', seamStartW + 'px', 'important');
+                railSeamFirst.style.setProperty('max-width', seamStartW + 'px', 'important');
+                railSeamFirst.style.setProperty('flex-basis', seamStartW + 'px', 'important');
+            }
+            for (var tc = 0; tc < topCollapsible.length; tc++) {
+                var tcEl = topCollapsible[tc];
+                var h = tcHeights[tc];
+                tcEl.style.setProperty('max-height', (h > 0 ? h : 64) + 'px', 'important');
+                tcEl.style.setProperty('overflow', 'hidden', 'important');
+                tcEl.style.setProperty('opacity', '1', 'important');
+            }
+        } else {
+            if (navRail) {
+                navRail.style.setProperty('width', '42px', 'important');
+                navRail.style.setProperty('min-width', '42px', 'important');
+                navRail.style.setProperty('max-width', '42px', 'important');
+                navRail.style.setProperty('flex-basis', '42px', 'important');
+            }
+            if (railSeamFirst) {
+                railSeamFirst.style.setProperty('margin-inline-start', '42px', 'important');
+                railSeamFirst.style.setProperty('width', '70px', 'important');
+                railSeamFirst.style.setProperty('min-width', '70px', 'important');
+                railSeamFirst.style.setProperty('max-width', '70px', 'important');
+                railSeamFirst.style.setProperty('flex-basis', '70px', 'important');
+            }
+        }
+
+        document.body.classList.add('wa-sidebar-animating');
+        // Unico flush de layout antes de activar los estilos de destino de la transicion
+        if (sideCol) {
+            void sideCol.offsetWidth;
+        }
+
+        var savedWidth = getSavedWidth();
+
+        if (targetCompact) {
+            if (sideColW >= MIN_WIDTH) {
+                localStorage.setItem(STORAGE_KEY_WIDTH, sideColW.toString());
+            }
+            document.body.classList.add('wa-sidebar-compact');
+            localStorage.setItem(STORAGE_KEY_COMPACT, 'true');
+            document.documentElement.style.setProperty('--wa-sidebar-width', '70px');
+            // Etiquetar solo atributos data-wa-avatar-col/data-wa-text-col; diferir shiftWrites al final de la animacion
+            syncAvatarTooltips(true);
+            if (resizerElement &&
+                !document.body.classList.contains('wa-tab-shell-active') &&
+                !document.body.classList.contains('wa-left-drawer-active')) {
+                resizerElement.style.display = 'none';
+                resizerElement.style.left = '-9999px';
+            }
+            if (mainCol) {
+                mainCol.style.setProperty('flex', '1 1 0%', 'important');
+                mainCol.style.setProperty('flex-grow', '1', 'important');
+                mainCol.style.setProperty('min-width', '0', 'important');
+                mainCol.style.setProperty('width', 'auto', 'important');
+                mainCol.style.setProperty('max-width', 'none', 'important');
+            }
+        } else {
+            document.body.classList.remove('wa-sidebar-compact');
+            localStorage.setItem(STORAGE_KEY_COMPACT, 'false');
+            syncAvatarTooltips(false);
+            document.documentElement.style.setProperty('--wa-sidebar-width', savedWidth + 'px');
+        }
+
+        var deltaY = 0;
+        if (flipPane && flipPane.isConnected) {
+            var flipAfterTop = flipPane.getBoundingClientRect().top;
+            deltaY = flipBeforeTop - flipAfterTop;
+            if (Math.abs(deltaY) > 2) {
+                flipPane.style.setProperty('transition', 'none', 'important');
+                flipPane.style.setProperty('transform', 'translateY(' + Math.round(deltaY) + 'px)', 'important');
+                void flipPane.offsetHeight;
+            }
+        }
+
+        // Sincronizar navRail + railSeamFirst + sideCol + topCollapsible + flipPane en el MISMO unico requestAnimationFrame
+        window.requestAnimationFrame(function() {
+            if (targetCompact) {
+                if (navRail) {
+                    navRail.style.setProperty('width', '42px', 'important');
+                    navRail.style.setProperty('min-width', '42px', 'important');
+                    navRail.style.setProperty('max-width', '42px', 'important');
+                    navRail.style.setProperty('flex-basis', '42px', 'important');
+                }
+                if (railSeamFirst) {
+                    railSeamFirst.style.setProperty('margin-inline-start', '42px', 'important');
+                    railSeamFirst.style.setProperty('width', '70px', 'important');
+                    railSeamFirst.style.setProperty('min-width', '70px', 'important');
+                    railSeamFirst.style.setProperty('max-width', '70px', 'important');
+                    railSeamFirst.style.setProperty('flex-basis', '70px', 'important');
+                }
+                for (var tc2 = 0; tc2 < topCollapsible.length; tc2++) {
+                    var tcEl2 = topCollapsible[tc2];
+                    tcEl2.style.setProperty('transition', 'max-height 180ms cubic-bezier(0.22, 1, 0.36, 1), opacity 150ms ease, padding 180ms cubic-bezier(0.22, 1, 0.36, 1), margin 180ms cubic-bezier(0.22, 1, 0.36, 1)', 'important');
+                    tcEl2.style.setProperty('max-height', '0px', 'important');
+                    tcEl2.style.setProperty('opacity', '0', 'important');
+                    tcEl2.style.setProperty('padding-top', '0px', 'important');
+                    tcEl2.style.setProperty('padding-bottom', '0px', 'important');
+                    tcEl2.style.setProperty('margin-top', '0px', 'important');
+                    tcEl2.style.setProperty('margin-bottom', '0px', 'important');
+                }
+                if (sideCol) {
+                    sideCol.style.removeProperty('border-right');
+                    sideCol.style.setProperty('width', '70px', 'important');
+                    sideCol.style.setProperty('min-width', '70px', 'important');
+                    sideCol.style.setProperty('max-width', '70px', 'important');
+                    sideCol.style.setProperty('flex-basis', '70px', 'important');
+                    sideCol.style.setProperty('overflow', 'visible', 'important');
+                }
+                if (side && side !== sideCol) {
+                    side.style.removeProperty('border-right');
+                    side.style.setProperty('width', '100%', 'important');
+                    side.style.setProperty('min-width', '0', 'important');
+                    side.style.setProperty('max-width', '100%', 'important');
+                    side.style.setProperty('flex', '1 1 auto', 'important');
+                    side.style.setProperty('overflow', 'hidden', 'important');
+                }
+            } else {
+                var railNormalW = (navRail && navRail.__waNormalWidth) ? navRail.__waNormalWidth : 64;
+                if (navRail) {
+                    navRail.style.setProperty('width', railNormalW + 'px', 'important');
+                    navRail.style.setProperty('min-width', railNormalW + 'px', 'important');
+                    navRail.style.setProperty('max-width', railNormalW + 'px', 'important');
+                    navRail.style.setProperty('flex-basis', railNormalW + 'px', 'important');
+                }
+                if (railSeamFirst) {
+                    railSeamFirst.style.setProperty('margin-inline-start', railNormalW + 'px', 'important');
+                    railSeamFirst.style.setProperty('width', savedWidth + 'px', 'important');
+                    railSeamFirst.style.setProperty('min-width', savedWidth + 'px', 'important');
+                    railSeamFirst.style.setProperty('max-width', savedWidth + 'px', 'important');
+                    railSeamFirst.style.setProperty('flex-basis', savedWidth + 'px', 'important');
+                }
+                setSidebarWidth(savedWidth, false);
+            }
+            if (flipPane && flipPane.isConnected && Math.abs(deltaY) > 2) {
+                flipPane.style.setProperty('transition', 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)', 'important');
+                flipPane.style.setProperty('transform', 'translateY(0px)', 'important');
+            }
+        });
+
+        var btn = document.querySelector('.wa-compact-toggle-btn');
+        if (btn) {
+            updateButtonAppearance(btn, targetCompact);
+        }
+
+        compactAnimTimer = setTimeout(function() {
+            compactAnimTimer = null;
+            if (flipPane) {
+                flipPane.style.removeProperty('transition');
+                flipPane.style.removeProperty('transform');
+            }
+            if (sideCol) {
+                sideCol.style.removeProperty('will-change');
+            }
+            if (navRail) {
+                navRail.style.removeProperty('will-change');
+                navRail.style.removeProperty('width');
+                navRail.style.removeProperty('min-width');
+                navRail.style.removeProperty('max-width');
+                navRail.style.removeProperty('flex-basis');
+            }
+            if (railSeamFirst) {
+                railSeamFirst.style.removeProperty('will-change');
+                railSeamFirst.style.removeProperty('margin-inline-start');
+                railSeamFirst.style.removeProperty('width');
+                railSeamFirst.style.removeProperty('min-width');
+                railSeamFirst.style.removeProperty('max-width');
+                railSeamFirst.style.removeProperty('flex-basis');
+            }
+            if (mainAppEl) {
+                mainAppEl.style.removeProperty('contain');
+            }
+            for (var tc3 = 0; tc3 < topCollapsible.length; tc3++) {
+                var tcEl3 = topCollapsible[tc3];
+                tcEl3.style.removeProperty('transition');
+                tcEl3.style.removeProperty('max-height');
+                tcEl3.style.removeProperty('overflow');
+                tcEl3.style.removeProperty('opacity');
+                tcEl3.style.removeProperty('padding-top');
+                tcEl3.style.removeProperty('padding-bottom');
+                tcEl3.style.removeProperty('margin-top');
+                tcEl3.style.removeProperty('margin-bottom');
+            }
+            document.body.classList.remove('wa-sidebar-animating');
+            if (isCompactActive()) {
+                syncAvatarTooltips(false);
+            }
+            var cAfter = resolveLayoutContainers();
+            if (cAfter && cAfter.flexContainer) {
+                syncAuxDrawers(cAfter.flexContainer, cAfter.sideColumn, cAfter.mainColumn);
+            }
+            updateResizerPosition();
+            scheduleMainScaleUpdate();
+            syncResizerOverlayState(lastPointerX, lastPointerY);
+        }, 210);
+    };
+
+    window.__waToggleSidebarCompact = function() {
+        window.__waSetSidebarCompact(!isCompactActive());
+    };
+
+    function ensureToggleButton() {
+        var existingBtn = document.querySelector('.wa-compact-toggle-btn');
+        if (existingBtn && existingBtn.isConnected) {
+            updateButtonAppearance(existingBtn, isCompactActive());
+            return true;
+        }
+
+        var header = document.querySelector('#side header');
+        if (!header) return false;
+
+        var wrapper = document.createElement('div');
+        wrapper.className = 'wa-compact-toggle-wrapper';
+
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'wa-compact-toggle-btn';
+        updateButtonAppearance(btn, isCompactActive());
+
+        btn.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            window.__waToggleSidebarCompact();
+        });
+
+        wrapper.appendChild(btn);
+
+        // Insertar siempre como hijo directo de header para no quedar oculto dentro de botones nativos
+        header.appendChild(wrapper);
+
+        return true;
+    }
+
+    function syncAvatarTooltips(tagOnly) {
+        if (!isCompactActive()) {
+            hideHoverTooltip();
+            if (syncAvatarTooltips.__dirty !== false) {
+                var shifted = document.querySelectorAll('[data-wa-avatar-shifted="true"]');
+                for (var sh = 0; sh < shifted.length; sh++) {
+                    shifted[sh].style.removeProperty('transform');
+                    shifted[sh].removeAttribute('data-wa-avatar-shifted');
+                    shifted[sh].removeAttribute('data-wa-shift-px');
+                }
+                var stale = document.querySelectorAll('[data-wa-compact-hide], [data-wa-avatar-col], [data-wa-text-col], [data-wa-chat-title]');
+                for (var s = 0; s < stale.length; s++) {
+                    stale[s].__waCompactTagged = false;
+                    stale[s].removeAttribute('data-wa-compact-hide');
+                    stale[s].removeAttribute('data-wa-avatar-col');
+                    stale[s].removeAttribute('data-wa-text-col');
+                    stale[s].removeAttribute('data-wa-chat-title');
+                }
+                restoreNativeTitles();
+                syncAvatarTooltips.__dirty = false;
+            }
+            return;
+        }
+        syncAvatarTooltips.__dirty = true;
+
+        var pane = document.getElementById('pane-side');
+        if (!pane) return;
+
+        var sideRoot = pane.closest('[data-wa-side-column="true"]') || document.getElementById('side');
+        if (sideRoot) {
+            var sideHeaders = sideRoot.querySelectorAll('header');
+            for (var h = 0; h < sideHeaders.length; h++) {
+                if (pane.contains(sideHeaders[h])) continue;
+                if (sideHeaders[h].getAttribute('data-wa-compact-hide') !== 'true') {
+                    sideHeaders[h].setAttribute('data-wa-compact-hide', 'true');
+                }
+            }
+
+            var ancCurr = pane;
+            while (ancCurr) {
+                if (ancCurr.hasAttribute('data-wa-compact-hide')) {
+                    ancCurr.removeAttribute('data-wa-compact-hide');
+                }
+                if (ancCurr === sideRoot) break;
+                var ancParent = ancCurr.parentElement;
+                if (!ancParent || !(sideRoot === ancParent || sideRoot.contains(ancParent))) {
+                    break;
+                }
+                var ancSibs = ancParent.children;
+                for (var as = 0; as < ancSibs.length; as++) {
+                    var ancSib = ancSibs[as];
+                    if (ancSib === ancCurr) continue;
+                    var isPaneBranch = ancSib.id === 'pane-side' || ancSib.contains(pane);
+                    var isSibToast = !isPaneBranch &&
+                                     !ancSib.matches('header') &&
+                                     !ancSib.querySelector('header, [role="search"], [role="tablist"], input') &&
+                                     (ancSib.matches('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') ||
+                                      ancSib.querySelector('[role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast]') !== null);
+                    if (isPaneBranch || isSibToast) {
+                        if (ancSib.hasAttribute('data-wa-compact-hide')) {
+                            ancSib.removeAttribute('data-wa-compact-hide');
+                        }
+                        continue;
+                    }
+                    if (ancSib.getAttribute('data-wa-compact-hide') !== 'true') {
+                        ancSib.setAttribute('data-wa-compact-hide', 'true');
+                    }
+                }
+                ancCurr = ancParent;
+            }
+        }
+
+        if (!pane.__waCompactScrollAttached) {
+            pane.__waCompactScrollAttached = true;
+            var scrollRaf = false;
+            pane.addEventListener('scroll', function() {
+                hideHoverTooltip();
+                if (!isCompactActive() || scrollRaf) return;
+                scrollRaf = true;
+                window.requestAnimationFrame(function() {
+                    scrollRaf = false;
+                    syncAvatarTooltips();
+                });
+            }, { passive: true });
+            pane.addEventListener('mouseleave', hideHoverTooltip, { passive: true });
+        }
+
+        function isTextSiblingEl(el, avatarEl) {
+            if (!el || el.nodeType !== 1) return false;
+            if (el.classList && el.classList.contains('wa-alt-badge')) return false;
+            if (el === avatarEl || el.contains(avatarEl)) return false;
+            var tag = el.tagName ? el.tagName.toLowerCase() : '';
+            if (tag === 'svg' || tag === 'path' || el.hasAttribute('data-icon')) return false;
+            if (el.getAttribute('role') === 'gridcell' ||
+                el.querySelector('[role="gridcell"], [data-testid="cell-frame-title"], [data-testid="cell-frame-primary"], [data-testid="cell-frame-secondary"], span[title], span[dir="auto"]') !== null) {
+                return true;
+            }
+            var nonSvgText = '';
+            for (var cn = 0; cn < el.childNodes.length; cn++) {
+                var ch = el.childNodes[cn];
+                if (ch.nodeType === 3) {
+                    nonSvgText += ch.nodeValue;
+                } else if (ch.nodeType === 1 && ch.tagName && ch.tagName.toLowerCase() !== 'svg' && !ch.hasAttribute('data-icon')) {
+                    nonSvgText += ch.textContent;
+                }
+            }
+            return nonSvgText.trim().length > 0;
+        }
+
+        // Ocultar bloques de aviso de cifrado y elementos de Archivados fuera de filas de chat
+        var lockIcons = pane.querySelectorAll('span[data-icon*="lock"], [data-testid*="encrypt"], a[href*="encryption"], a[href*="28030015"]');
+        for (var l = 0; l < lockIcons.length; l++) {
+            var lockEl = lockIcons[l];
+            if (lockEl.closest('[role="row"], [role="listitem"]')) continue;
+            var lockTarget = lockEl;
+            while (lockTarget.parentElement && lockTarget.parentElement !== pane &&
+                   !lockTarget.parentElement.querySelector('[role="row"], [role="listitem"]') &&
+                   !lockTarget.parentElement.matches('[role="grid"], [role="region"], [role="list"]')) {
+                lockTarget = lockTarget.parentElement;
+            }
+            if (lockTarget !== pane &&
+                !lockTarget.matches('[role="grid"], [role="region"], [role="list"]') &&
+                !lockTarget.querySelector('[role="row"], [role="listitem"], [role="grid"], [role="region"], [role="list"]')) {
+                if (lockTarget.getAttribute('data-wa-compact-hide') !== 'true') {
+                    lockTarget.setAttribute('data-wa-compact-hide', 'true');
+                }
+            }
+        }
+
+        // Acotar hideNonRowBlocks a los primeros 2 niveles de #pane-side sin recursion profunda
+        function hideNonRowBlocks(node, depth) {
+            if (!node || node.nodeType !== 1 || depth > 2) return;
+            if (node.matches('[role="row"], [role="listitem"]')) return;
+            if (node.getAttribute('data-wa-compact-hide') === 'true') return;
+
+            var hasRowsOrList = node.querySelector('[role="row"], [role="listitem"], [role="grid"], [role="region"], [role="list"]') !== null;
+            if (node !== pane && !hasRowsOrList && !node.matches('[role="grid"], [role="region"], [role="list"]')) {
+                var txt = (node.textContent || '').trim();
+                var hasLock = node.querySelector('span[data-icon*="lock"], [data-testid*="encrypt"], a[href*="encryption"], a[href*="28030015"]') !== null;
+                var hasArchive = node.querySelector('span[data-icon*="archiv"], [data-testid*="archiv"]') !== null;
+                var isEncryptTxt = /(cifrad|extremo a extremo|end-to-end|encrypt|criptograf)/i.test(txt);
+                var isArchiveTxt = /^(archivados|archived|arquivadas)(\s*\d+)?$/i.test(txt);
+                if (hasLock || hasArchive || isEncryptTxt || isArchiveTxt) {
+                    node.setAttribute('data-wa-compact-hide', 'true');
+                }
+                return;
+            }
+
+            if (depth < 2) {
+                var children = node.children;
+                for (var c = 0; c < children.length; c++) {
+                    hideNonRowBlocks(children[c], depth + 1);
+                }
+            }
+        }
+        hideNonRowBlocks(pane, 0);
+
+        var rows = pane.querySelectorAll('[role="row"], [role="listitem"]');
+        if (rows.length > 0) {
+            // Ocultar hermanos sin filas del contenedor de lista dentro de #pane-side (p. ej. aviso de cifrado al pie)
+            var listAncestor = rows[0].parentElement;
+            if (listAncestor && listAncestor !== pane) {
+                var chain = listAncestor.parentElement;
+                var childInChain = listAncestor;
+                while (chain && pane.contains(chain)) {
+                    var siblings = chain.children;
+                    for (var sb = 0; sb < siblings.length; sb++) {
+                        var sib = siblings[sb];
+                        if (sib === childInChain) continue;
+                        if (sib.classList && sib.classList.contains('wa-alt-badge')) continue;
+                        if (sib.matches('[role="row"], [role="listitem"]')) continue;
+                        if (sib.querySelector('[role="row"], [role="listitem"]')) continue;
+                        if ((sib.textContent && sib.textContent.trim().length > 0) ||
+                            sib.querySelector('svg, button, a, span') !== null) {
+                            if (sib.getAttribute('data-wa-compact-hide') !== 'true') {
+                                sib.setAttribute('data-wa-compact-hide', 'true');
+                            }
+                        }
+                    }
+                    if (chain === pane) break;
+                    childInChain = chain;
+                    chain = chain.parentElement;
+                }
+            }
+        } else {
+            rows = pane.querySelectorAll('div[data-testid="cell-frame-container"]');
+        }
+
+        var pendingAlignments = [];
+
+        for (var i = 0; i < rows.length; i++) {
+            var row = rows[i];
+
+            // Fast-path para filas ya etiquetadas cuyo avatar sigue conectado
+            if (row.__waCompactTagged === true && row.__waAvatarCol && row.__waAvatarEl &&
+                row.contains(row.__waAvatarCol) && row.contains(row.__waAvatarEl) &&
+                row.__waAvatarCol.getAttribute('data-wa-avatar-col') === 'true') {
+                var quickName = computeRowChatName(row);
+                if (quickName && row.getAttribute('data-wa-chat-title') !== quickName) {
+                    row.setAttribute('data-wa-chat-title', quickName);
+                }
+                pendingAlignments.push({
+                    row: row,
+                    avatarCol: row.__waAvatarCol,
+                    avatarEl: row.__waAvatarEl
+                });
+                continue;
+            }
+
+            var isPinned = row.querySelector('span[data-icon*="pin"], [data-testid*="pin"]') !== null;
+            if (!isPinned) {
+                var hasArchiveIcon = row.querySelector('span[data-icon*="archiv"], [data-testid*="archiv"]') !== null;
+                var rowFullText = (row.textContent || '').trim();
+                var isArchivedRow = hasArchiveIcon || /^(archivados|archived|arquivadas)(\s*\d+)?$/i.test(rowFullText);
+                var isNoticeRow = !row.querySelector('img, span[title], [data-testid="cell-frame-title"]') &&
+                                  (row.querySelector('span[data-icon*="lock"], [data-testid*="encrypt"]') !== null ||
+                                   /(cifrad|extremo a extremo|end-to-end|encrypt|criptograf)/i.test(rowFullText));
+                if (isArchivedRow || isNoticeRow) {
+                    if (row.getAttribute('data-wa-compact-hide') !== 'true') {
+                        row.setAttribute('data-wa-compact-hide', 'true');
+                    }
+                    continue;
+                }
+            }
+            if (row.hasAttribute('data-wa-compact-hide')) {
+                row.removeAttribute('data-wa-compact-hide');
+            }
+
+            var name = computeRowChatName(row);
+            if (name && row.getAttribute('data-wa-chat-title') !== name) {
+                row.setAttribute('data-wa-chat-title', name);
+            }
+            suppressNativeTitles(row);
+
+            // Prioridad estricta: img de avatar (no emoji inline), luego svg con <image>, luego iconos por defecto, luego svg grande
+            var avatarEl = null;
+            var imgs = row.querySelectorAll('img:not(.emoji):not([data-plain-text])');
+            for (var im = 0; im < imgs.length; im++) {
+                var wAttr = parseInt(imgs[im].getAttribute('width') || '0', 10);
+                if (!imgs[im].classList.contains('emoji') && (wAttr === 0 || wAttr >= 24)) {
+                    avatarEl = imgs[im];
+                    break;
+                }
+            }
+            if (!avatarEl) {
+                var svgImg = row.querySelector('svg image');
+                if (svgImg) {
+                    avatarEl = svgImg.closest('svg');
+                }
+            }
+            if (!avatarEl) {
+                avatarEl = row.querySelector(
+                    'span[data-icon*="default-"], span[data-icon*="community"], ' +
+                    'span[data-icon*="avatar"], span[data-icon*="channel"], span[data-icon*="newsletter"], ' +
+                    'span[data-icon*="broadcast"]'
+                );
+            }
+            if (!avatarEl) {
+                var svgs = row.querySelectorAll('svg');
+                for (var sv = 0; sv < svgs.length; sv++) {
+                    var svR = svgs[sv].getBoundingClientRect();
+                    if (svR.width >= 32 && svR.height >= 32) {
+                        avatarEl = svgs[sv];
+                        break;
+                    }
+                }
+            }
+            if (!avatarEl) continue;
+
+            var avatarCol = null;
+            var flexParent = null;
+            var curr = avatarEl;
+            while (curr && curr !== row) {
+                var parent = curr.parentElement;
+                if (!parent || !row.contains(parent)) break;
+                var hasTextSib = false;
+                var pChildren = parent.children;
+                for (var k = 0; k < pChildren.length; k++) {
+                    if (pChildren[k] !== curr && isTextSiblingEl(pChildren[k], avatarEl)) {
+                        hasTextSib = true;
+                        break;
+                    }
+                }
+                if (hasTextSib) {
+                    avatarCol = curr;
+                    flexParent = parent;
+                    break;
+                }
+                curr = parent;
+            }
+
+            if (avatarCol && flexParent) {
+                var oldCols = row.querySelectorAll('[data-wa-avatar-col], [data-wa-text-col]');
+                for (var oc = 0; oc < oldCols.length; oc++) {
+                    var oldEl = oldCols[oc];
+                    if (oldEl !== avatarCol && oldEl.parentElement !== flexParent) {
+                        if (oldEl.getAttribute('data-wa-avatar-shifted') === 'true') {
+                            oldEl.style.removeProperty('transform');
+                            oldEl.removeAttribute('data-wa-avatar-shifted');
+                        }
+                        oldEl.removeAttribute('data-wa-avatar-col');
+                        oldEl.removeAttribute('data-wa-text-col');
+                    }
+                }
+
+                if (avatarCol.getAttribute('data-wa-avatar-col') !== 'true') {
+                    avatarCol.setAttribute('data-wa-avatar-col', 'true');
+                }
+                if (avatarCol.hasAttribute('data-wa-text-col')) {
+                    avatarCol.removeAttribute('data-wa-text-col');
+                }
+
+                var cols = flexParent.children;
+                for (var j = 0; j < cols.length; j++) {
+                    var col = cols[j];
+                    if (col === avatarCol) continue;
+                    if ((col.classList && col.classList.contains('wa-alt-badge')) || col.contains(avatarEl)) {
+                        if (col.hasAttribute('data-wa-text-col')) {
+                            col.removeAttribute('data-wa-text-col');
+                        }
+                        continue;
+                    }
+                    if (col.getAttribute('data-wa-text-col') !== 'true') {
+                        col.setAttribute('data-wa-text-col', 'true');
+                    }
+                    if (col.hasAttribute('data-wa-avatar-col')) {
+                        col.removeAttribute('data-wa-avatar-col');
+                    }
+                }
+
+                row.__waCompactTagged = true;
+                row.__waAvatarCol = avatarCol;
+                row.__waAvatarEl = avatarEl;
+
+                pendingAlignments.push({
+                    row: row,
+                    avatarCol: avatarCol,
+                    avatarEl: avatarEl
+                });
+            }
+        }
+
+        if (tagOnly || (document.body && document.body.classList.contains('wa-sidebar-animating'))) {
+            return;
+        }
+
+        // Fase 1 (Lecturas DOM agrupadas, cero layout thrashing por fila): medir posiciones actuales
+        var shiftWrites = [];
+        for (var p = 0; p < pendingAlignments.length; p++) {
+            var item = pendingAlignments[p];
+            var rowRect = item.row.getBoundingClientRect();
+            var avRect = item.avatarEl.getBoundingClientRect();
+            if (rowRect.width <= 0 || avRect.width <= 0) continue;
+            var currentShift = parseFloat(item.avatarCol.getAttribute('data-wa-shift-px') || '0') || 0;
+            var delta = (rowRect.left + rowRect.width / 2) - (avRect.left + avRect.width / 2);
+            var targetShift = Math.round(currentShift + delta);
+            if (targetShift !== currentShift) {
+                shiftWrites.push({
+                    avatarCol: item.avatarCol,
+                    shift: targetShift
+                });
+            }
+        }
+
+        // Fase 2 (Escrituras DOM agrupadas): aplicar solo las diferencias necesarias en un unico paso
+        for (var w = 0; w < shiftWrites.length; w++) {
+            var sw = shiftWrites[w];
+            if (Math.abs(sw.shift) > 1) {
+                sw.avatarCol.style.setProperty('transform', 'translateX(' + sw.shift + 'px)', 'important');
+                sw.avatarCol.setAttribute('data-wa-avatar-shifted', 'true');
+                sw.avatarCol.setAttribute('data-wa-shift-px', String(sw.shift));
+            } else {
+                sw.avatarCol.style.removeProperty('transform');
+                sw.avatarCol.removeAttribute('data-wa-avatar-shifted');
+                sw.avatarCol.removeAttribute('data-wa-shift-px');
+            }
+        }
+    }
+
+    function ensureRightResizer() {
+        if (!rightResizerElement || !document.body.contains(rightResizerElement)) {
+            rightResizerElement = document.getElementById('wa-custom-right-resizer');
+            if (!rightResizerElement) {
+                rightResizerElement = document.createElement('div');
+                rightResizerElement.id = 'wa-custom-right-resizer';
+                rightResizerElement.setAttribute('role', 'separator');
+                rightResizerElement.setAttribute('aria-orientation', 'vertical');
+                rightResizerElement.setAttribute('title', 'Arrastra para redimensionar el panel de informacion');
+                document.body.appendChild(rightResizerElement);
+            }
+            rightResizerElement.removeEventListener('mousedown', onRightMouseDown);
+            rightResizerElement.addEventListener('mousedown', onRightMouseDown);
+        }
+
+        var rightCol = document.querySelector('[data-wa-right-column="true"]');
+        if (window.ResizeObserver && rightCol && !rightCol.__waRightResizeObserverAttached) {
+            rightCol.__waRightResizeObserverAttached = true;
+            var rightResizeObserver = new ResizeObserver(function() {
+                if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+                if (!isRightDragging) {
+                    updateRightResizerPosition();
+                }
+            });
+            rightResizeObserver.observe(rightCol);
+        }
+    }
+
+    function initResizer() {
+        var side = document.querySelector('#side');
+        if (!side) return false;
+
+        resolveLayoutContainers();
+
+        if (!resizerElement || !document.body.contains(resizerElement)) {
+            resizerElement = document.getElementById('wa-custom-resizer');
+            if (!resizerElement) {
+                resizerElement = document.createElement('div');
+                resizerElement.id = 'wa-custom-resizer';
+                resizerElement.setAttribute('role', 'separator');
+                resizerElement.setAttribute('aria-orientation', 'vertical');
+                resizerElement.setAttribute('title', 'Arrastra para redimensionar el panel lateral');
+                document.body.appendChild(resizerElement);
+            }
+            resizerElement.removeEventListener('mousedown', onMouseDown);
+            resizerElement.addEventListener('mousedown', onMouseDown);
+        }
+
+        ensureRightResizer();
+
+        var containers = resolveLayoutContainers();
+        var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : side;
+
+        if (window.ResizeObserver && targetEl && !targetEl.__waResizeObserverAttached) {
+            targetEl.__waResizeObserverAttached = true;
+            var resizeObserver = new ResizeObserver(function() {
+                if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+                if (!isDragging) {
+                    updateLeftResizerPosition();
+                }
+                if (!isRightDragging) {
+                    updateRightResizerPosition();
+                }
+            });
+            resizeObserver.observe(targetEl);
+        }
+
+        updateResizerPosition();
+        return true;
+    }
+
+    injectStyles();
+
+    function applyCompactInline() {
+        var c = resolveLayoutContainers();
+        if (!c) return;
+        if (c.sideColumn) {
+            c.sideColumn.style.removeProperty('border-right');
+            c.sideColumn.style.setProperty('width', '70px', 'important');
+            c.sideColumn.style.setProperty('min-width', '70px', 'important');
+            c.sideColumn.style.setProperty('max-width', '70px', 'important');
+            c.sideColumn.style.setProperty('flex-basis', '70px', 'important');
+            c.sideColumn.style.setProperty('overflow', 'visible', 'important');
+        }
+        if (c.side && c.side !== c.sideColumn) {
+            c.side.style.removeProperty('border-right');
+            c.side.style.setProperty('width', '100%', 'important');
+            c.side.style.setProperty('min-width', '0', 'important');
+            c.side.style.setProperty('max-width', '100%', 'important');
+            c.side.style.setProperty('flex', '1 1 auto', 'important');
+            c.side.style.setProperty('overflow', 'hidden', 'important');
+        }
+        if (c.mainColumn) {
+            c.mainColumn.style.setProperty('flex', '1 1 0%', 'important');
+            c.mainColumn.style.setProperty('min-width', '0', 'important');
+        }
+        if (c.flexContainer) {
+            syncAuxDrawers(c.flexContainer, c.sideColumn, c.mainColumn);
+        }
+        if (c.side && c.sideColumn && c.mainColumn) {
+            c.side.__waCompactApplied = true;
+        }
+        ensureRightResizer();
+        updateRightResizerPosition();
+        ensureMainResizeObserver();
+        scheduleMainScaleUpdate();
+    }
+
+    function isPointerNearResizer(clientX) {
+        if (typeof clientX !== 'number') return false;
+        if (resizerElement && resizerElement.style.display !== 'none') {
+            var lLeft = parseFloat(resizerElement.style.left);
+            if (!isNaN(lLeft) && lLeft > -100 && Math.abs(clientX - lLeft) <= 40) {
+                return true;
+            }
+        }
+        if (rightResizerElement && rightResizerElement.style.display !== 'none') {
+            var rLeft = parseFloat(rightResizerElement.style.left);
+            if (!isNaN(rLeft) && rLeft > -100 && Math.abs(clientX - rLeft) <= 40) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function onGlobalPointerMove(e) {
+        lastPointerX = e.clientX;
+        lastPointerY = e.clientY;
+        handleCompactTooltipPointerMove(e);
+        if (!isDragging && !isRightDragging && isPointerNearResizer(e.clientX)) {
+            scheduleResizerOverlayCheck();
+        }
+    }
+
+    function onGlobalPointerDown(e) {
+        lastPointerX = e.clientX;
+        lastPointerY = e.clientY;
+        hideHoverTooltip();
+        var tgt = e.target;
+        if (tgt && tgt.closest && tgt.closest('#main footer')) {
+            pickerOpeningUntil = performance.now() + 500;
+        }
+        if (!isDragging && !isRightDragging) {
+            syncResizerOverlayState(e.clientX, e.clientY);
+        }
+    }
+
+    var themeAttrObserver = new MutationObserver(function(mutations) {
+        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+        if (window.__waAltKeyDown === true) return;
+        var hasExternalThemeChange = false;
+        for (var i = 0; i < mutations.length; i++) {
+            var m = mutations[i];
+            if (m.attributeName === 'data-theme') {
+                hasExternalThemeChange = true;
+                break;
+            }
+            if (m.attributeName === 'class') {
+                if (m.target === document.body) {
+                    var cls = (document.body.className || '').replace(/\b(wa-sidebar-compact|wa-sidebar-animating|wa-resizing-active)\b/g, '').trim();
+                    if (cls === (document.body.__waLastExternalClass || '')) {
+                        continue;
+                    }
+                    document.body.__waLastExternalClass = cls;
+                }
+                hasExternalThemeChange = true;
+                break;
+            }
+            if (m.attributeName === 'style') {
+                if (m.target === document.documentElement) {
+                    var rawStyle = (document.documentElement.getAttribute('style') || '').replace(/--wa-[a-z0-9-]+\s*:[^;]+;?/gi, '').trim();
+                    if (rawStyle === (document.documentElement.__waLastExternalStyle || '')) {
+                        continue;
+                    }
+                    document.documentElement.__waLastExternalStyle = rawStyle;
+                }
+                hasExternalThemeChange = true;
+                break;
+            }
+        }
+        if (hasExternalThemeChange) {
+            discoveredWdsVarRuleText = '';
+            scheduleAccentSync(false);
+        }
+    });
+
+    function observeThemeRoots() {
+        var targets = [document.documentElement, document.body, document.querySelector('#app > div')];
+        for (var i = 0; i < targets.length; i++) {
+            var t = targets[i];
+            if (!t || t.__waThemeObserverAttached) continue;
+            t.__waThemeObserverAttached = true;
+            if (t === document.body) {
+                t.__waLastExternalClass = (t.className || '').replace(/\b(wa-sidebar-compact|wa-sidebar-animating|wa-resizing-active)\b/g, '').trim();
+            } else if (t === document.documentElement) {
+                t.__waLastExternalStyle = (t.getAttribute('style') || '').replace(/--wa-[a-z0-9-]+\s*:[^;]+;?/gi, '').trim();
+            }
+            themeAttrObserver.observe(t, { attributes: true, attributeFilter: ['class', 'style', 'data-theme'] });
+        }
+    }
+
+    var savedCompact = localStorage.getItem(STORAGE_KEY_COMPACT);
+    if (savedCompact === 'true') {
+        document.body.classList.add('wa-sidebar-compact');
+        document.documentElement.style.setProperty('--wa-sidebar-width', '70px');
+        applyCompactInline();
+    } else {
+        var initialWidth = getSavedWidth();
+        setSidebarWidth(initialWidth, false);
+    }
+
+    initResizer();
+    ensureToggleButton();
+    syncAvatarTooltips();
+    ensureMainResizeObserver();
+    scheduleMainScaleUpdate();
+    syncDynamicAccent();
+    observeThemeRoots();
+    syncResizerOverlayState(lastPointerX, lastPointerY);
+
+    document.addEventListener('pointermove', onGlobalPointerMove, { passive: true, capture: true });
+    document.addEventListener('pointerdown', onGlobalPointerDown, { capture: true });
+    document.addEventListener('keydown', hideHoverTooltip, { passive: true, capture: true });
+    document.addEventListener('mouseleave', hideHoverTooltip, { passive: true });
+    window.addEventListener('blur', hideHoverTooltip);
+
+    var videoNotesTimer = null;
+    var mutationSyncRaf = null;
+    var pendingMainMutation = false;
+
+    function scheduleVideoNotesSync() {
+        if (videoNotesTimer) return;
+        videoNotesTimer = setTimeout(function() {
+            videoNotesTimer = null;
+            window.requestAnimationFrame(function() {
+                tagVideoNotes();
+            });
+        }, 90);
+    }
+
+    function attachMainVideoNotesListeners(mainNode) {
+        if (!mainNode || mainNode.__waVideoNotesListenersAttached) return;
+        mainNode.__waVideoNotesListenersAttached = true;
+        mainNode.addEventListener('load', function(ev) {
+            var t = ev && ev.target;
+            if (t && t.tagName && (t.tagName === 'IMG' || t.tagName === 'VIDEO')) {
+                scheduleVideoNotesSync();
+            }
+        }, true);
+        mainNode.addEventListener('loadeddata', function() {
+            scheduleVideoNotesSync();
+        }, true);
+        mainNode.addEventListener('scroll', function() {
+            scheduleVideoNotesSync();
+        }, { passive: true, capture: true });
+    }
+
+    var initMainNode = document.getElementById('main');
+    if (initMainNode) {
+        attachMainVideoNotesListeners(initMainNode);
+    }
+    scheduleVideoNotesSync();
+
+    var observer = new MutationObserver(function(mutations) {
+        var onlyInternal = mutations.length > 0;
+        var mainEl = document.getElementById('main');
+        var mainColEl = cachedMainColumn || document.querySelector('[data-wa-main-column="true"]');
+        var hasAddedPopupOrMain = false;
+        var isOpeningPickerNow = performance.now() < pickerOpeningUntil;
+        var isAnimatingNow = document.body && document.body.classList.contains('wa-sidebar-animating');
+        var addedGreenTargets = [];
+
+        for (var m = 0; m < mutations.length; m++) {
+            var mut = mutations[m];
+            var tgt = mut.target;
+            if (!tgt || (tgt.id !== 'wa-compact-hover-tooltip' && tgt.id !== 'wa-accent-probe' && tgt.id !== 'wa-dynamic-wds-overrides')) {
+                onlyInternal = false;
+            }
+            if (tgt) {
+                if ((mainEl && (tgt === mainEl || mainEl.contains(tgt) || tgt.contains(mainEl))) ||
+                    (mainColEl && (tgt === mainColEl || mainColEl.contains(tgt)))) {
+                    pendingMainMutation = true;
+                }
+            }
+            if (mut.addedNodes && mut.addedNodes.length > 0) {
+                for (var an = 0; an < mut.addedNodes.length; an++) {
+                    var added = mut.addedNodes[an];
+                    if (!added || added.nodeType !== 1) continue;
+                    if (added.id === 'main' || (added.querySelector && added.querySelector('#main, video, svg circle'))) {
+                        pendingMainMutation = true;
+                    }
+                    if (!hasAddedPopupOrMain &&
+                        (isOpeningPickerNow ||
+                         (added.matches && added.matches('[data-animate-picker], [data-animate-modal-popup], [role="dialog"], [role="menu"], [role="listbox"]')) ||
+                         (added.querySelector && added.querySelector('[data-animate-picker], [data-animate-modal-popup], [role="dialog"], [role="menu"], [role="listbox"], [role="tablist"]')))) {
+                        hasAddedPopupOrMain = true;
+                    }
+                    if (!isAnimatingNow && addedGreenTargets.length < 24 && added.closest &&
+                        added.closest('#side, [data-wa-nav-rail="true"], [data-wa-side-column="true"], [data-wa-tab-side-column="true"], [data-wa-left-drawer="true"], #app > div > header')) {
+                        addedGreenTargets.push(added);
+                    }
+                }
+            }
+        }
+        if (onlyInternal) return;
+
+        // Etiquetado incremental en microtask de addedNodes en barra lateral/rail para evitar delay de 220ms al clickear chats
+        if (addedGreenTargets.length > 0) {
+            for (var ag = 0; ag < addedGreenTargets.length; ag++) {
+                tagWhatsAppGreenSubtree(addedGreenTargets[ag], 120);
+            }
+        }
+
+        // Pre-paint clamping en microtask para evitar que el picker de emojis pinte fuera de pantalla en el frame 1
+        if (hasAddedPopupOrMain) {
+            syncFloatingPickerBounds();
+        }
+
+        if (mutationSyncRaf) return;
+        mutationSyncRaf = window.requestAnimationFrame(function() {
+            mutationSyncRaf = null;
+            var isAnimatingCompact = document.body && document.body.classList.contains('wa-sidebar-animating');
+            ensureToggleButton();
+            if (!isAnimatingCompact) {
+                syncAvatarTooltips();
+            }
+            observeThemeRoots();
+            if (window.__waEnsurePaneListeners) {
+                window.__waEnsurePaneListeners();
+            }
+            if (!isAnimatingCompact) {
+                var c = resolveLayoutContainers();
+                if (c && c.flexContainer) {
+                    syncAuxDrawers(c.flexContainer, c.sideColumn, c.mainColumn);
+                }
+                ensureRightResizer();
+                updateRightResizerPosition();
+                ensureMainResizeObserver();
+                if (!isCompactActive()) {
+                    initResizer();
+                    var sEl = document.querySelector('#side');
+                    if (sEl && !sEl.__waWidthApplied) {
+                        sEl.__waWidthApplied = true;
+                        setSidebarWidth(currentSidebarWidth || getSavedWidth(), false);
+                    }
+                } else if (document.querySelector('#side') &&
+                           (!document.querySelector('[data-wa-side-column="true"]') ||
+                            !document.querySelector('#side').__waCompactApplied)) {
+                    applyCompactInline();
+                }
+                scheduleMainScaleUpdate();
+                scheduleAccentSync(false);
+            }
+            scheduleResizerOverlayCheck();
+            var curMain = document.getElementById('main');
+            if (curMain) {
+                attachMainVideoNotesListeners(curMain);
+            }
+            if (pendingMainMutation) {
+                pendingMainMutation = false;
+                scheduleVideoNotesSync();
+            }
+        });
+    });
+
+    observer.observe(document.body, { childList: true, subtree: true });
+
+    window.addEventListener('resize', function() {
+        hideHoverTooltip();
+        syncFloatingPickerBounds();
+        if (!isCompactActive()) {
+            var curWidth = getSavedWidth();
+            setSidebarWidth(curWidth, false);
+        }
+        if (document.querySelector('[data-wa-right-column="true"]')) {
+            setRightPanelWidth(getSavedRightWidth(), false);
+        } else {
+            updateRightResizerPosition();
+            scheduleMainScaleUpdate();
+        }
+        scheduleMainScaleUpdate();
+        scheduleResizerOverlayCheck();
+    });
+})();

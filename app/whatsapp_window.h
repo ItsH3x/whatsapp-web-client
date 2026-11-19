@@ -36,20 +36,7 @@
 #include "config_manager.h"
 #include "notification_manager.h"
 #include "lock_overlay.h"
-
-class WhatsAppPage : public QWebEnginePage {
-    Q_OBJECT
-public:
-    explicit WhatsAppPage(QWebEngineProfile *profile, QObject *parent = nullptr);
-    explicit WhatsAppPage(QObject *parent = nullptr);
-
-protected:
-    bool acceptNavigationRequest(const QUrl &url, NavigationType type, bool isMainFrame) override;
-    QWebEnginePage *createWindow(QWebEnginePage::WebWindowType type) override;
-
-private slots:
-    void handleNewWindowUrl(const QUrl &url, QWebEnginePage *tempPage);
-};
+#include "whatsapp_page.h"
 
 struct RecentChat {
     QString name;
@@ -93,6 +80,8 @@ protected:
     void hideEvent(QHideEvent *event) override;
 
 private slots:
+    void initWebEngine();
+    void initDeferredServices();
     void grantPermission(QWebEnginePermission permission);
     void handleDownload(QWebEngineDownloadRequest *download);
     void onDownloadFinished(QWebEngineDownloadRequest *download);
@@ -110,6 +99,8 @@ private slots:
 
 private:
     void handleNotification(std::unique_ptr<QWebEngineNotification> notification);
+    void ensureLockOverlay();
+    void ensureDownloadDir();
     void setupZoom();
     void setupChatShortcuts();
     void setupPrivacyShortcut();
@@ -124,7 +115,7 @@ private:
     void runChatJs(const QString &body, std::function<void(const QVariant &)> callback = nullptr, bool retried = false);
     QString getReadReceiptBlockerJs() const;
     QString getSidebarEnhancementsJs() const;
-    void setupReadReceiptScript();
+    void setupWebScripts();
 
     QWebEngineView *m_browser;
     QWebEngineProfile *m_profile;
@@ -144,6 +135,7 @@ private:
     int m_currentChatIndex;
     bool m_altKeyDown;
 
+    QUrl m_initialUrl;
     QString m_downloadDir;
     QList<DownloadRecord> m_sessionDownloads;
     QSet<QWebEngineDownloadRequest*> m_activeDownloads;
