@@ -2,7 +2,7 @@
 Version=1.0
 Name=WhatsApp Web
 Comment=Cliente no oficial de WhatsApp
-Exec=/usr/bin/whatsapp-web-client %U
+Exec=whatsapp-web-client %U
 Icon=whatsapp-web-client
 Terminal=false
 Type=Application

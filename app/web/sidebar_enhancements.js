@@ -375,62 +375,91 @@
 
     function resolveNativeBadgeFg() {
         var scopes = [
-            document.querySelector('[data-wa-nav-rail="true"]') || document.querySelector('#app header'),
+            document.querySelector('[data-wa-nav-rail="true"]') || document.querySelector('#app > div > header') || document.querySelector('#app header'),
             document.getElementById('pane-side') || document.getElementById('side')
         ];
+        var badgeSelector = 'span[aria-label*="no le" i], span[aria-label*="unread" i], [aria-label*="no le" i] span, [aria-label*="unread" i] span';
         for (var s = 0; s < scopes.length; s++) {
             var root = scopes[s];
             if (!root) continue;
-            var badges = root.querySelectorAll('span[aria-label*="no le" i], span[aria-label*="unread" i], [data-wa-accent-bg="true"]');
+            var badges = root.querySelectorAll(badgeSelector);
             for (var i = 0; i < badges.length; i++) {
                 var b = badges[i];
                 if (!b || (b.classList && b.classList.contains('wa-alt-badge'))) continue;
                 var leaf = b;
-                var innerSpans = b.querySelectorAll('span, div');
-                for (var j = 0; j < innerSpans.length; j++) {
-                    var sp = innerSpans[j];
-                    if (sp.children.length === 0 && /^\d+$/.test((sp.textContent || '').trim())) {
-                        leaf = sp;
-                        break;
-                    }
-                }
-                if (leaf.children.length === 0 && /^\d+$/.test((leaf.textContent || '').trim())) {
-                    var br = leaf.getBoundingClientRect();
-                    if (br.width > 0 && br.height > 0) {
-                        var cs = window.getComputedStyle(leaf);
-                        var col = parseCssColor(cs.color);
-                        if (col && col.a > 0.5) {
-                            return 'rgb(' + col.r + ', ' + col.g + ', ' + col.b + ')';
+                if (leaf.children.length > 0) {
+                    var innerSpans = b.querySelectorAll('span, div');
+                    for (var j = 0; j < innerSpans.length; j++) {
+                        var sp = innerSpans[j];
+                        if (sp.children.length === 0 && /^\d+\+?$/.test((sp.textContent || '').trim())) {
+                            leaf = sp;
+                            break;
                         }
                     }
                 }
-            }
-        }
-        var varTargets = [document.querySelector('#app > div'), document.body, document.documentElement];
-        var varNames = ['--unread-marker-text', '--WDS-content-on-accent'];
-        for (var vt = 0; vt < varTargets.length; vt++) {
-            var t = varTargets[vt];
-            if (!t) continue;
-            var tCs = window.getComputedStyle(t);
-            for (var vn = 0; vn < varNames.length; vn++) {
-                var raw = (tCs.getPropertyValue(varNames[vn]) || '').trim();
-                if (raw) {
-                    var parsed = parseCssColor(raw);
-                    if (parsed && parsed.a > 0.5) {
-                        return 'rgb(' + parsed.r + ', ' + parsed.g + ', ' + parsed.b + ')';
+                if (leaf.children.length !== 0 || !/^\d+\+?$/.test((leaf.textContent || '').trim())) continue;
+                var br = leaf.getBoundingClientRect();
+                if (br.width <= 0 || br.height <= 0 || br.width > 96 || br.height > 40) continue;
+
+                // Exigir un fondo cromatico real en la pildora (descarta contadores grises de chats silenciados)
+                var hasChromaticPillBg = false;
+                var pillNode = leaf;
+                for (var depth = 0; depth < 3 && pillNode && pillNode !== root; depth++) {
+                    var pr = pillNode.getBoundingClientRect();
+                    if (pr.width > 96 || pr.height > 40) break;
+                    var pBg = parseCssColor(window.getComputedStyle(pillNode).backgroundColor);
+                    if (pBg && pBg.a > 0.5) {
+                        hasChromaticPillBg = isValidAccentColor(pBg);
+                        break;
                     }
+                    pillNode = pillNode.parentElement;
+                }
+                if (!hasChromaticPillBg) continue;
+
+                var cs = window.getComputedStyle(leaf);
+                var col = parseCssColor(cs.color);
+                if (col && col.a > 0.5) {
+                    return 'rgb(' + col.r + ', ' + col.g + ', ' + col.b + ')';
                 }
             }
         }
-        if (document.body) {
-            if (document.body.classList.contains('dark')) return '#111b21';
-            var bgCol = parseCssColor(window.getComputedStyle(document.body).backgroundColor);
-            if (bgCol && bgCol.a > 0.2) {
+        var varTargets = [
+            document.getElementById('pane-side'),
+            document.getElementById('side'),
+            document.querySelector('#app > div')
+        ];
+        for (var vt = 0; vt < varTargets.length; vt++) {
+            var t = varTargets[vt];
+            if (!t) continue;
+            var raw = (window.getComputedStyle(t).getPropertyValue('--unread-marker-text') || '').trim();
+            if (raw) {
+                var parsed = parseCssColor(raw);
+                if (parsed && parsed.a > 0.5) {
+                    return 'rgb(' + parsed.r + ', ' + parsed.g + ', ' + parsed.b + ')';
+                }
+            }
+        }
+        var bgTargets = [
+            document.getElementById('pane-side'),
+            document.getElementById('side'),
+            document.querySelector('[data-wa-side-column="true"]'),
+            document.querySelector('#app > div'),
+            document.querySelector('#side header'),
+            document.querySelector('[data-wa-nav-rail="true"]')
+        ];
+        for (var bt = 0; bt < bgTargets.length; bt++) {
+            var bgEl = bgTargets[bt];
+            if (!bgEl) continue;
+            var bgCol = parseCssColor(window.getComputedStyle(bgEl).backgroundColor);
+            if (bgCol && bgCol.a > 0.5) {
                 var bgLum = (0.299 * bgCol.r + 0.587 * bgCol.g + 0.114 * bgCol.b) / 255;
                 return bgLum < 0.5 ? '#111b21' : '#ffffff';
             }
         }
-        return '#111b21';
+        if (document.body && document.body.classList.contains('dark')) {
+            return '#111b21';
+        }
+        return '#ffffff';
     }
 
     function ensureAccentProbe() {
@@ -1231,91 +1260,134 @@
         return footerExpanded;
     }
 
-    function isFloatingPanelOverResizer(rRect) {
-        var mainEl = document.getElementById('main');
-        if (mainEl) {
-            var mainRect = mainEl.getBoundingClientRect();
-            // 1. Si footer se expandio verticalmente (panel de emojis/stickers/GIFs dentro de footer)
-            var footerEl = mainEl.querySelector('footer');
-            if (footerEl) {
-                var fRect = footerEl.getBoundingClientRect();
-                if (fRect.height >= 150 && rectsIntersect(fRect, rRect, 24)) {
-                    return true;
-                }
-            }
-            // 2. Pickers, tablists o paneles intermedios realmente visibles en #main
-            var pickers = mainEl.querySelectorAll('[data-animate-picker], [role="tablist"], [role="dialog"], [role="menu"], [role="listbox"]');
-            for (var p = 0; p < pickers.length; p++) {
-                var pk = pickers[p];
-                if (pk.closest('header')) continue;
-                if (!isElementVisible(pk)) continue;
-                var host = pk;
-                for (var up = 0; up < 5 && host.parentElement && host.parentElement !== mainEl; up++) {
-                    var parentCand = host.parentElement;
-                    var pRect = parentCand.getBoundingClientRect();
-                    if (pRect.height >= mainRect.height * 0.78) break;
-                    if (parentCand.querySelector('[role="application"]')) break;
-                    host = parentCand;
-                    if (pRect.height >= 120 && pRect.width >= 160) break;
-                }
-                if (!isElementVisible(host)) continue;
-                var pr = host.getBoundingClientRect();
-                if (pr.height >= 110 && pr.height < mainRect.height * 0.80 && rectsIntersect(pr, rRect, 24)) {
-                    return true;
-                }
-            }
-        }
-        // 3. Menus, dialogs o pickers flotantes sobre el resizer
-        if (typeof document.elementsFromPoint === 'function') {
-            var probeXs = [Math.round(rRect.left - 12), Math.round(rRect.left + rRect.width / 2), Math.round(rRect.right + 12)];
-            var probeYs = [0.2, 0.4, 0.6, 0.75, 0.88];
-            for (var xi = 0; xi < probeXs.length; xi++) {
-                var px = probeXs[xi];
-                if (px < 2 || px > window.innerWidth - 2) continue;
-                for (var yi = 0; yi < probeYs.length; yi++) {
-                    var py = Math.round(rRect.top + rRect.height * probeYs[yi]);
-                    var stack = document.elementsFromPoint(px, py);
-                    for (var si = 0; si < stack.length; si++) {
-                        var el = stack[si];
-                        if (!el || el === resizerElement || el === rightResizerElement) continue;
-                        if (el.closest('header, [data-wa-right-column="true"], [data-wa-left-drawer="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]')) continue;
-                        var floatAnc = el.closest('[role="dialog"], [role="menu"], [role="listbox"], [data-animate-picker], [data-animate-dropdown-item], [data-animate-modal-popup]');
-                        if (floatAnc && !floatAnc.closest('[data-wa-right-column="true"], [data-wa-left-drawer="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]') && isElementVisible(floatAnc)) return true;
-                    }
-                }
-            }
-        }
-        return false;
-    }
+    var FLOATING_PANEL_SELECTOR = '[role="dialog"], [role="menu"], [role="listbox"], [data-animate-picker], [data-animate-dropdown-item], [data-animate-modal-popup]';
+    var OVERLAY_EXCLUDE_SELECTOR = '[data-wa-right-column="true"], [data-wa-left-drawer="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]';
 
-    function isResizerCovered(resizerEl, clientX, clientY, hasFloatingOverlay) {
-        if (!resizerEl || !resizerEl.isConnected || resizerEl.style.display === 'none') return false;
-        if (hasFloatingOverlay) return true;
-        var rRect = resizerEl.getBoundingClientRect();
-        if (rRect.width <= 0 || rRect.height <= 0) return false;
+    function collectOverlayStateSnapshot() {
+        var snap = {
+            forceCovered: false,
+            hasAnyCandidate: false,
+            overlayRects: [],
+            floatingRects: [],
+            expandedFooterRect: null,
+            mainPickerRects: []
+        };
 
         var globalOverlays = document.querySelectorAll(OVERLAY_CHECK_SELECTOR);
         for (var i = 0; i < globalOverlays.length; i++) {
             var ov = globalOverlays[i];
             if (!isElementVisible(ov)) continue;
-            if (ov.id === 'wa-privacy-blur-overlay') return true;
-            if (ov.closest('[data-wa-right-column="true"], [data-wa-left-drawer="true"], [data-wa-tab-shell="true"], [data-wa-tab-side-column="true"]')) continue;
-            var ovRect = ov.getBoundingClientRect();
-            var isBigOverlay = ovRect.width >= window.innerWidth * 0.40 && ovRect.height >= window.innerHeight * 0.40;
-            if (isBigOverlay) {
-                return true;
+            if (ov.id === 'wa-privacy-blur-overlay') {
+                snap.forceCovered = true;
+                return snap;
             }
-            if (rectsIntersect(ovRect, rRect, 18)) {
-                return true;
+            if (ov.closest(OVERLAY_EXCLUDE_SELECTOR)) continue;
+            var ovRect = ov.getBoundingClientRect();
+            if (ovRect.width >= window.innerWidth * 0.40 && ovRect.height >= window.innerHeight * 0.40) {
+                snap.forceCovered = true;
+                return snap;
+            }
+            snap.overlayRects.push(ovRect);
+            snap.hasAnyCandidate = true;
+        }
+
+        var floatingNodes = document.querySelectorAll(FLOATING_PANEL_SELECTOR);
+        for (var f = 0; f < floatingNodes.length; f++) {
+            var fn = floatingNodes[f];
+            if (fn.closest('header, ' + OVERLAY_EXCLUDE_SELECTOR)) continue;
+            if (!isElementVisible(fn)) continue;
+            snap.floatingRects.push(fn.getBoundingClientRect());
+            snap.hasAnyCandidate = true;
+        }
+
+        var mainEl = document.getElementById('main');
+        if (mainEl) {
+            var footerEl = mainEl.querySelector('footer');
+            if (footerEl) {
+                var fRect = footerEl.getBoundingClientRect();
+                if (fRect.height >= 150) {
+                    snap.expandedFooterRect = fRect;
+                    snap.hasAnyCandidate = true;
+                }
+            }
+            var pickers = mainEl.querySelectorAll('[data-animate-picker], [role="tablist"], [role="dialog"], [role="menu"], [role="listbox"]');
+            if (pickers.length > 0) {
+                var mainRect = mainEl.getBoundingClientRect();
+                for (var p = 0; p < pickers.length; p++) {
+                    var pk = pickers[p];
+                    if (pk.closest('header')) continue;
+                    if (!isElementVisible(pk)) continue;
+                    var host = pk;
+                    for (var up = 0; up < 5 && host.parentElement && host.parentElement !== mainEl; up++) {
+                        var parentCand = host.parentElement;
+                        var pRect = parentCand.getBoundingClientRect();
+                        if (pRect.height >= mainRect.height * 0.78) break;
+                        if (parentCand.querySelector('[role="application"]')) break;
+                        host = parentCand;
+                        if (pRect.height >= 120 && pRect.width >= 160) break;
+                    }
+                    if (!isElementVisible(host)) continue;
+                    var pr = host.getBoundingClientRect();
+                    if (pr.height >= 110 && pr.height < mainRect.height * 0.80) {
+                        snap.mainPickerRects.push(pr);
+                        snap.hasAnyCandidate = true;
+                    }
+                }
             }
         }
-        if (isFloatingPanelOverResizer(rRect)) {
+
+        return snap;
+    }
+
+    function isFloatingPanelOverResizer(rRect, overlaySnap) {
+        var snap = overlaySnap || collectOverlayStateSnapshot();
+        if (snap.forceCovered) return true;
+        if (!snap.hasAnyCandidate) return false;
+
+        if (snap.expandedFooterRect && rectsIntersect(snap.expandedFooterRect, rRect, 24)) {
             return true;
         }
-        var midX = rRect.left + rRect.width / 2;
-        var sampleYs = [rRect.top + rRect.height * 0.2, rRect.top + rRect.height * 0.5, rRect.top + rRect.height * 0.8];
-        for (var sy = 0; sy < sampleYs.length; sy++) {
-            if (isPointCoveredByOverlay(resizerEl, midX, sampleYs[sy])) {
+        for (var mp = 0; mp < snap.mainPickerRects.length; mp++) {
+            if (rectsIntersect(snap.mainPickerRects[mp], rRect, 24)) {
+                return true;
+            }
+        }
+        for (var fr = 0; fr < snap.floatingRects.length; fr++) {
+            if (rectsIntersect(snap.floatingRects[fr], rRect, 14)) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    function isResizerCovered(resizerEl, clientX, clientY, hasFloatingOverlay, overlaySnap) {
+        if (!resizerEl || !resizerEl.isConnected || resizerEl.style.display === 'none') return false;
+        if (hasFloatingOverlay) return true;
+
+        var snap = overlaySnap || collectOverlayStateSnapshot();
+        if (snap.forceCovered) return true;
+
+        var rRect = resizerEl.getBoundingClientRect();
+        if (rRect.width <= 0 || rRect.height <= 0) return false;
+
+        if (snap.hasAnyCandidate) {
+            for (var i = 0; i < snap.overlayRects.length; i++) {
+                if (rectsIntersect(snap.overlayRects[i], rRect, 18)) {
+                    return true;
+                }
+            }
+            if (isFloatingPanelOverResizer(rRect, snap)) {
+                return true;
+            }
+        }
+
+        // Sin overlays detectados: a lo sumo 1 hit-test puntual si el puntero real esta en +-20px del resizer
+        if (typeof clientX === 'number' && typeof clientY === 'number' &&
+            clientX >= rRect.left - 20 && clientX <= rRect.right + 20 &&
+            clientY >= rRect.top - 20 && clientY <= rRect.bottom + 20) {
+            var midX = Math.round(rRect.left + rRect.width / 2);
+            var probeY = Math.round(Math.max(rRect.top + 2, Math.min(rRect.bottom - 2, clientY)));
+            if (isPointCoveredByOverlay(resizerEl, midX, probeY)) {
                 return true;
             }
         }
@@ -1342,21 +1414,28 @@
     function syncResizerOverlayState(clientX, clientY) {
         syncFloatingPickerBounds();
         var hasFloatingOverlay = hasActiveFloatingPickerOrModal();
+        var overlaySnap = hasFloatingOverlay ? null : collectOverlayStateSnapshot();
         if (resizerElement && !isDragging) {
-            var hasTabOrDrawer = false;
-            var tabColsCheck = document.querySelectorAll('[data-wa-tab-side-column="true"], [data-wa-left-drawer="true"]');
-            for (var tcc = 0; tcc < tabColsCheck.length; tcc++) {
-                var tccR = tabColsCheck[tcc].getBoundingClientRect();
-                if (tccR.width > 0 && tccR.height > 0) {
-                    hasTabOrDrawer = true;
-                    break;
+            var compactHidesLeft = false;
+            if (isCompactActive()) {
+                var hasTabOrDrawer = !!(document.body && document.body.classList.contains('wa-tab-shell-active'));
+                if (!hasTabOrDrawer) {
+                    var tabColsCheck = document.querySelectorAll('[data-wa-tab-side-column="true"], [data-wa-left-drawer="true"]');
+                    for (var tcc = 0; tcc < tabColsCheck.length; tcc++) {
+                        var tccR = tabColsCheck[tcc].getBoundingClientRect();
+                        if (tccR.width > 0 && tccR.height > 0) {
+                            hasTabOrDrawer = true;
+                            break;
+                        }
+                    }
                 }
+                compactHidesLeft = !hasTabOrDrawer;
             }
-            var leftCovered = ((isCompactActive() && !hasTabOrDrawer) || hasFloatingOverlay) ? true : isResizerCovered(resizerElement, clientX, clientY, false);
+            var leftCovered = (compactHidesLeft || hasFloatingOverlay) ? true : isResizerCovered(resizerElement, clientX, clientY, false, overlaySnap);
             applyResizerDisabledState(resizerElement, leftCovered);
         }
         if (rightResizerElement && !isRightDragging) {
-            var rightCovered = hasFloatingOverlay ? true : isResizerCovered(rightResizerElement, clientX, clientY, false);
+            var rightCovered = hasFloatingOverlay ? true : isResizerCovered(rightResizerElement, clientX, clientY, false, overlaySnap);
             applyResizerDisabledState(rightResizerElement, rightCovered);
         }
     }
@@ -1514,444 +1593,6 @@
         }
         tip.classList.add('is-visible');
         positionHoverTooltip(e.clientX, e.clientY);
-    }
-
-    function isCircularRadius(el) {
-        if (!el) return false;
-        var cs = window.getComputedStyle(el);
-        var radius = cs.borderTopLeftRadius || '';
-        var clip = cs.clipPath || '';
-        return radius.indexOf('50%') !== -1 || parseFloat(radius) >= 75 || clip.indexOf('circle') !== -1;
-    }
-
-    function hasLargeProgressCircle(el) {
-        if (!el) return false;
-        var circles = el.querySelectorAll('svg circle');
-        for (var i = 0; i < circles.length; i++) {
-            var svg = circles[i].closest('svg');
-            if (!svg) continue;
-            var r = svg.getBoundingClientRect();
-            if (r.width >= 130 && r.height >= 130 && Math.abs(r.width - r.height) <= 28) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    var lastVideoNotesDiagnostics = [];
-
-    function collectVideoNoteSeeds(mainEl) {
-        var seeds = [];
-        var raw = mainEl.querySelectorAll('video, img:not(.emoji):not([data-plain-text]), canvas, svg circle');
-        for (var i = raw.length - 1; i >= 0; i--) {
-            var el = raw[i];
-            if (el.closest('header, footer')) continue;
-            var tag = el.tagName ? el.tagName.toLowerCase() : '';
-            var seedNode = (tag === 'circle') ? (el.closest('svg') || el) : el;
-            var r = seedNode.getBoundingClientRect();
-            if (tag === 'circle') {
-                if (r.width >= 130 && r.width <= 360 && r.height >= 130 && r.height <= 360 && Math.abs(r.width - r.height) <= 28) {
-                    if (seeds.indexOf(seedNode) === -1) {
-                        seeds.push(seedNode);
-                    }
-                }
-            } else {
-                // No exigir que el propio video/img sea cuadrado (puede ser 9:16 o 3:4 recortado por un ancestro circular 200x200)
-                if (r.width >= 120 && r.height >= 120 && Math.min(r.width, r.height) <= 360) {
-                    if (seeds.indexOf(seedNode) === -1) {
-                        seeds.push(seedNode);
-                    }
-                }
-            }
-        }
-        var divs = mainEl.querySelectorAll('div, span');
-        var scannedDivs = 0;
-        for (var d = divs.length - 1; d >= 0 && scannedDivs < 2000; d--) {
-            var dv = divs[d];
-            if (dv.closest('header, footer')) continue;
-            scannedDivs++;
-            var dr = dv.getBoundingClientRect();
-            if (dr.width < 150 || dr.width > 340 || dr.height < 150 || dr.height > 340 || Math.abs(dr.width - dr.height) > 16) continue;
-            var dCs = window.getComputedStyle(dv);
-            var hasBgImg = dCs.backgroundImage && dCs.backgroundImage !== 'none' && dCs.backgroundImage.indexOf('url(') !== -1;
-            var isCirc = isCircularRadius(dv) && (dCs.overflow === 'hidden' || dCs.overflowX === 'hidden' || hasBgImg);
-            if (hasBgImg || isCirc) {
-                if (seeds.indexOf(dv) === -1) {
-                    seeds.push(dv);
-                }
-            }
-        }
-        return seeds;
-    }
-
-    function summarizeVideoNoteSubtree(rootEl, maxNodes) {
-        if (!rootEl) return [];
-        var out = [];
-        var limit = maxNodes || 35;
-        function walk(node, depth) {
-            if (!node || node.nodeType !== 1 || out.length >= limit || depth > 7) return;
-            var r = node.getBoundingClientRect();
-            var cs = window.getComputedStyle(node);
-            out.push({
-                depth: depth,
-                tag: node.tagName ? node.tagName.toLowerCase() : '',
-                cls: (typeof node.className === 'string' && node.className.length > 0) ? node.className.slice(0, 60) : '',
-                role: node.getAttribute('role') || '',
-                rect: {
-                    top: Math.round(r.top * 10) / 10,
-                    bottom: Math.round(r.bottom * 10) / 10,
-                    left: Math.round(r.left * 10) / 10,
-                    right: Math.round(r.right * 10) / 10,
-                    width: Math.round(r.width * 10) / 10,
-                    height: Math.round(r.height * 10) / 10
-                },
-                position: cs.position,
-                topBottom: cs.top + ' / ' + cs.bottom,
-                overflow: cs.overflow,
-                borderRadius: cs.borderTopLeftRadius,
-                padding: cs.paddingTop + ' ' + cs.paddingRight + ' ' + cs.paddingBottom + ' ' + cs.paddingLeft,
-                margin: cs.marginTop + ' ' + cs.marginRight + ' ' + cs.marginBottom + ' ' + cs.marginLeft,
-                borderWidth: cs.borderTopWidth + ' ' + cs.borderRightWidth + ' ' + cs.borderBottomWidth + ' ' + cs.borderLeftWidth,
-                backgroundColor: cs.backgroundColor,
-                transform: cs.transform,
-                translate: cs.translate || 'none',
-                vnOuter: node.getAttribute('data-wa-video-note') || '',
-                vnInner: node.getAttribute('data-wa-video-note-inner') || '',
-                vnFixed: node.getAttribute('data-wa-video-note-fixed') || ''
-            });
-            var children = node.children;
-            for (var c = 0; c < children.length; c++) {
-                walk(children[c], depth + 1);
-            }
-        }
-        walk(rootEl, 0);
-        return out;
-    }
-
-    window.__waInspectVideoNotes = function() {
-        var mainEl = document.getElementById('main');
-        if (!mainEl) return { seeds: [], decisions: lastVideoNotesDiagnostics };
-        tagVideoNotes();
-        var seeds = collectVideoNoteSeeds(mainEl);
-        var report = [];
-        for (var i = 0; i < seeds.length; i++) {
-            var s = seeds[i];
-            var chainInfo = [];
-            var curr = s;
-            var topCircAncestor = null;
-            for (var lvl = 0; lvl < 11 && curr && curr !== mainEl; lvl++) {
-                var r = curr.getBoundingClientRect();
-                var cs = window.getComputedStyle(curr);
-                if (r.width >= 160 && r.width <= 340 && Math.abs(r.width - r.height) <= 18 && isCircularRadius(curr)) {
-                    topCircAncestor = curr;
-                }
-                chainInfo.push({
-                    lvl: lvl,
-                    tag: curr.tagName ? curr.tagName.toLowerCase() : '',
-                    rect: {
-                        top: Math.round(r.top * 10) / 10,
-                        bottom: Math.round(r.bottom * 10) / 10,
-                        left: Math.round(r.left * 10) / 10,
-                        right: Math.round(r.right * 10) / 10,
-                        width: Math.round(r.width * 10) / 10,
-                        height: Math.round(r.height * 10) / 10
-                    },
-                    display: cs.display,
-                    position: cs.position,
-                    topBottom: cs.top + ' / ' + cs.bottom,
-                    overflow: cs.overflow,
-                    borderRadius: cs.borderTopLeftRadius,
-                    clipPath: cs.clipPath,
-                    padding: cs.paddingTop + ' ' + cs.paddingRight + ' ' + cs.paddingBottom + ' ' + cs.paddingLeft,
-                    margin: cs.marginTop + ' ' + cs.marginRight + ' ' + cs.marginBottom + ' ' + cs.marginLeft,
-                    borderWidth: cs.borderTopWidth + ' ' + cs.borderRightWidth + ' ' + cs.borderBottomWidth + ' ' + cs.borderLeftWidth,
-                    backgroundColor: cs.backgroundColor,
-                    backgroundImage: cs.backgroundImage !== 'none' ? 'url(...)' : 'none',
-                    transform: cs.transform,
-                    translate: cs.translate || 'none',
-                    childCount: curr.children ? curr.children.length : 0,
-                    hasProgressSvg: hasLargeProgressCircle(curr)
-                });
-                curr = curr.parentElement;
-            }
-            report.push({
-                seedIndex: i,
-                seedTag: s.tagName ? s.tagName.toLowerCase() : '',
-                chain: chainInfo,
-                subtree: topCircAncestor ? summarizeVideoNoteSubtree(topCircAncestor, 35) : []
-            });
-        }
-        return {
-            seeds: report,
-            decisions: lastVideoNotesDiagnostics
-        };
-    };
-
-    function tagVideoNotes() {
-        var mainEl = document.getElementById('main');
-        if (!mainEl) return;
-
-        var seeds = collectVideoNoteSeeds(mainEl);
-        var processedOuters = [];
-        var diagnostics = [];
-
-        for (var i = 0; i < seeds.length; i++) {
-            var seed = seeds[i];
-            var chain = [];
-            var curr = seed;
-            for (var lvl = 0; lvl < 11 && curr && curr !== mainEl; lvl++) {
-                var r = curr.getBoundingClientRect();
-                if (r.width >= 120 && r.height >= 120 && Math.min(r.width, r.height) <= 370) {
-                    var cs = window.getComputedStyle(curr);
-                    var bgCol = parseCssColor(cs.backgroundColor);
-                    var hasOpaqueBg = !!(bgCol && bgCol.a > 0.3);
-                    var hasBorder = (parseFloat(cs.borderTopWidth) || 0) >= 1 || (parseFloat(cs.borderBottomWidth) || 0) >= 1;
-                    var isSquareCircleRange = r.width >= 160 && r.width <= 340 && r.height >= 160 && r.height <= 340 && Math.abs(r.width - r.height) <= 16;
-                    var hasClip = cs.overflow === 'hidden' || cs.overflowX === 'hidden' || cs.overflowY === 'hidden';
-                    chain.push({
-                        el: curr,
-                        rect: r,
-                        cs: cs,
-                        isSquareCircleRange: isSquareCircleRange,
-                        circular: isCircularRadius(curr),
-                        hasClip: hasClip,
-                        hasOpaqueBg: hasOpaqueBg,
-                        hasBorder: hasBorder,
-                        hasProgressSvg: hasLargeProgressCircle(curr)
-                    });
-                }
-                curr = curr.parentElement;
-            }
-            if (chain.length < 2) continue;
-
-            // Buscar el par concentrico real (outer, inner):
-            // outer: ancestro circular (160..340px, |w-h| <= 16) con fondo/borde/progreso
-            // inner: el ancestro mas externo dentro de outer que sea estrictamente mas pequeno en AMBOS ejes por 3..22px
-            var matchedOuterItem = null;
-            var matchedInnerItem = null;
-
-            for (var outIdx = chain.length - 1; outIdx >= 1; outIdx--) {
-                var candOut = chain[outIdx];
-                if (!candOut.isSquareCircleRange) continue;
-                if (!candOut.circular && !candOut.hasProgressSvg) continue;
-
-                for (var inIdx = outIdx - 1; inIdx >= 0; inIdx--) {
-                    var candIn = chain[inIdx];
-                    if (!candIn.isSquareCircleRange) continue;
-                    var dw = candOut.rect.width - candIn.rect.width;
-                    var dh = candOut.rect.height - candIn.rect.height;
-                    if (dw >= 2.5 && dw <= 22 && dh >= 2.5 && dh <= 22 && (candIn.circular || candIn.hasClip)) {
-                        matchedOuterItem = candOut;
-                        matchedInnerItem = candIn;
-                        break;
-                    }
-                }
-                if (matchedOuterItem && matchedInnerItem) break;
-            }
-
-            // Si el descendiente mas pequeno no estaba en la cadena directa de la semilla (p. ej. la semilla fue el svg de progreso),
-            // buscar dentro del ancestro circular externo un hijo/descendiente circular que sea 3..22px menor en ambos ejes
-            if (!matchedOuterItem) {
-                for (var c2 = chain.length - 1; c2 >= 0; c2--) {
-                    var topCand = chain[c2];
-                    if (!topCand.isSquareCircleRange || (!topCand.circular && !topCand.hasProgressSvg)) continue;
-                    var subDivs = topCand.el.querySelectorAll('div, span, video, img:not(.emoji), canvas');
-                    for (var sd = 0; sd < subDivs.length; sd++) {
-                        var subEl = subDivs[sd];
-                        if (subEl.tagName && subEl.tagName.toLowerCase() === 'svg') continue;
-                        var sr = subEl.getBoundingClientRect();
-                        if (sr.width < 160 || sr.width > 340 || Math.abs(sr.width - sr.height) > 16) continue;
-                        var sdw = topCand.rect.width - sr.width;
-                        var sdh = topCand.rect.height - sr.height;
-                        if (sdw >= 2.5 && sdw <= 22 && sdh >= 2.5 && sdh <= 22) {
-                            var subCs = window.getComputedStyle(subEl);
-                            var subCirc = isCircularRadius(subEl) || subCs.overflow === 'hidden' || subCs.overflowX === 'hidden';
-                            if (subCirc) {
-                                matchedOuterItem = topCand;
-                                matchedInnerItem = {
-                                    el: subEl,
-                                    rect: sr,
-                                    cs: subCs
-                                };
-                                break;
-                            }
-                        }
-                    }
-                    if (matchedOuterItem && matchedInnerItem) break;
-                }
-            }
-
-            if (!matchedOuterItem || !matchedInnerItem) continue;
-
-            var outer = matchedOuterItem.el;
-            var inner = matchedInnerItem.el;
-            if (outer === inner || processedOuters.indexOf(outer) !== -1) continue;
-            processedOuters.push(outer);
-
-            // Subir inner al ancestro mas externo que conserve el mismo tamano ~200x200 (diferencia 3..22px respecto a outer)
-            // y que NO sea un contenedor que incluya un hermano SVG de tamano outer (~208x208)
-            var outRect0 = outer.getBoundingClientRect();
-            while (inner.parentElement && inner.parentElement !== outer && outer.contains(inner.parentElement)) {
-                var pEl = inner.parentElement;
-                var pR = pEl.getBoundingClientRect();
-                var pdw = outRect0.width - pR.width;
-                var pdh = outRect0.height - pR.height;
-                if (pdw < 2.5 || pdw > 22 || pdh < 2.5 || pdh > 22) break;
-                var hasOuterSizedSvg = false;
-                var pSvgs = pEl.querySelectorAll('svg');
-                for (var ps = 0; ps < pSvgs.length; ps++) {
-                    var svgR = pSvgs[ps].getBoundingClientRect();
-                    if (svgR.width > pR.width + 2 || svgR.height > pR.height + 2) {
-                        hasOuterSizedSvg = true;
-                        break;
-                    }
-                }
-                if (hasOuterSizedSvg) break;
-                inner = pEl;
-            }
-
-            // Nivel 1: Igualar asimetrias de padding/margin/border/top en la cadena DESDE inner HASTA outer (INCLUYENDO outer!)
-            // Nunca poner padding: 0 ni width/height: 100% (para conservar intacto el anillo de 4px y la barra de progreso)
-            var adjustedByLayout = false;
-            var currNode = inner;
-            while (currNode && (currNode === outer || outer.contains(currNode))) {
-                var nCs = window.getComputedStyle(currNode);
-                var pt = parseFloat(nCs.paddingTop) || 0;
-                var pb = parseFloat(nCs.paddingBottom) || 0;
-                var pl = parseFloat(nCs.paddingLeft) || 0;
-                var pr = parseFloat(nCs.paddingRight) || 0;
-                if (Math.abs(pt - pb) >= 1.2 && (pt + pb) > 0) {
-                    var avgV = ((pt + pb) / 2).toFixed(2) + 'px';
-                    currNode.style.setProperty('padding-top', avgV, 'important');
-                    currNode.style.setProperty('padding-bottom', avgV, 'important');
-                    if (Math.abs(pl - pr) >= 1.2 && (pl + pr) > 0) {
-                        var avgH = ((pl + pr) / 2).toFixed(2) + 'px';
-                        currNode.style.setProperty('padding-left', avgH, 'important');
-                        currNode.style.setProperty('padding-right', avgH, 'important');
-                    }
-                    adjustedByLayout = true;
-                }
-                var mt = parseFloat(nCs.marginTop) || 0;
-                var mb = parseFloat(nCs.marginBottom) || 0;
-                if (Math.abs(mt - mb) >= 1.2 && (Math.abs(mt) > 0.5 || Math.abs(mb) > 0.5)) {
-                    var avgM = ((mt + mb) / 2).toFixed(2) + 'px';
-                    currNode.style.setProperty('margin-top', avgM, 'important');
-                    currNode.style.setProperty('margin-bottom', avgM, 'important');
-                    adjustedByLayout = true;
-                }
-                var bt = parseFloat(nCs.borderTopWidth) || 0;
-                var bb = parseFloat(nCs.borderBottomWidth) || 0;
-                if (Math.abs(bt - bb) >= 1.2 && (bt + bb) > 0) {
-                    var avgB = ((bt + bb) / 2).toFixed(2) + 'px';
-                    currNode.style.setProperty('border-top-width', avgB, 'important');
-                    currNode.style.setProperty('border-bottom-width', avgB, 'important');
-                    adjustedByLayout = true;
-                }
-
-                // Ocultar hermanos espaciadores vacios de poca altura (2..14px) que empujen inner hacia abajo
-                var prevSib = currNode.previousElementSibling;
-                if (prevSib && currNode !== outer && currNode.parentElement && outer.contains(currNode.parentElement)) {
-                    var psRect = prevSib.getBoundingClientRect();
-                    var psPos = window.getComputedStyle(prevSib).position;
-                    if (psPos !== 'absolute' && psPos !== 'fixed' &&
-                        psRect.height >= 2 && psRect.height <= 14 &&
-                        prevSib.children.length === 0 && (prevSib.textContent || '').trim().length === 0) {
-                        prevSib.style.setProperty('display', 'none', 'important');
-                        adjustedByLayout = true;
-                    }
-                }
-                if (currNode === outer) break;
-                currNode = currNode.parentElement;
-            }
-
-            outer.setAttribute('data-wa-video-note', 'true');
-            inner.setAttribute('data-wa-video-note-inner', 'true');
-
-            var iCs = window.getComputedStyle(inner);
-            if (iCs.display === 'inline') {
-                inner.style.setProperty('display', 'block', 'important');
-            }
-
-            // Nivel 2: Re-medir la mascara circular inner (200x200) respecto al anillo outer (208x208) y centrar con translate
-            var prevDx = parseFloat(inner.getAttribute('data-wa-vn-dx') || '0') || 0;
-            var prevDy = parseFloat(inner.getAttribute('data-wa-vn-dy') || '0') || 0;
-
-            var outRect = outer.getBoundingClientRect();
-            var inRect = inner.getBoundingClientRect();
-
-            var naturalTopGap = (inRect.top - prevDy) - outRect.top;
-            var naturalBottomGap = outRect.bottom - (inRect.bottom - prevDy);
-            var naturalLeftGap = (inRect.left - prevDx) - outRect.left;
-            var naturalRightGap = outRect.right - (inRect.right - prevDx);
-
-            var dy = (naturalBottomGap - naturalTopGap) / 2;
-            var dx = (naturalRightGap - naturalLeftGap) / 2;
-            var appliedMethod = adjustedByLayout ? 'layout' : 'none';
-
-            if ((Math.abs(dy) > 0.4 || Math.abs(dx) > 0.4) && Math.abs(dy) < 22 && Math.abs(dx) < 22) {
-                var dxStr = dx.toFixed(2);
-                var dyStr = dy.toFixed(2);
-                inner.style.setProperty('translate', dxStr + 'px ' + dyStr + 'px', 'important');
-                inner.setAttribute('data-wa-vn-shifted', 'true');
-                inner.setAttribute('data-wa-vn-dx', dxStr);
-                inner.setAttribute('data-wa-vn-dy', dyStr);
-                appliedMethod = adjustedByLayout ? 'layout+translate' : 'translate';
-
-                // Verificacion post-escritura: si translate no movio el boundingClientRect de inner, aplicar position: relative + top/left
-                var checkRect = inner.getBoundingClientRect();
-                var checkTopGap = checkRect.top - outRect.top;
-                var checkBottomGap = outRect.bottom - checkRect.bottom;
-                if (Math.abs(checkBottomGap - checkTopGap) > 1.5) {
-                    var remDy = (checkBottomGap - checkTopGap) / 2;
-                    var remDx = ((outRect.right - checkRect.right) - (checkRect.left - outRect.left)) / 2;
-                    if (iCs.position === 'static') {
-                        inner.style.setProperty('position', 'relative', 'important');
-                    }
-                    var baseTop = parseFloat(window.getComputedStyle(inner).top) || 0;
-                    var baseLeft = parseFloat(window.getComputedStyle(inner).left) || 0;
-                    inner.style.setProperty('top', (baseTop + remDy).toFixed(2) + 'px', 'important');
-                    inner.style.setProperty('left', (baseLeft + remDx).toFixed(2) + 'px', 'important');
-                    appliedMethod += '+topLeftFallback';
-                }
-            } else if (adjustedByLayout && inner.getAttribute('data-wa-vn-shifted') === 'true') {
-                inner.style.removeProperty('translate');
-                inner.removeAttribute('data-wa-vn-shifted');
-                inner.removeAttribute('data-wa-vn-dx');
-                inner.removeAttribute('data-wa-vn-dy');
-            }
-
-            var finalOutRect = outer.getBoundingClientRect();
-            var finalInRect = inner.getBoundingClientRect();
-            var postTopGap = Math.round((finalInRect.top - finalOutRect.top) * 100) / 100;
-            var postBottomGap = Math.round((finalOutRect.bottom - finalInRect.bottom) * 100) / 100;
-            var postLeftGap = Math.round((finalInRect.left - finalOutRect.left) * 100) / 100;
-            var postRightGap = Math.round((finalOutRect.right - finalInRect.right) * 100) / 100;
-
-            if (Math.abs(postTopGap - postBottomGap) <= 1.5) {
-                outer.setAttribute('data-wa-video-note-fixed', 'true');
-            }
-
-            diagnostics.push({
-                outerSize: Math.round(finalOutRect.width) + 'x' + Math.round(finalOutRect.height),
-                innerSize: Math.round(finalInRect.width) + 'x' + Math.round(finalInRect.height),
-                naturalGaps: {
-                    top: Math.round(naturalTopGap * 100) / 100,
-                    bottom: Math.round(naturalBottomGap * 100) / 100,
-                    left: Math.round(naturalLeftGap * 100) / 100,
-                    right: Math.round(naturalRightGap * 100) / 100
-                },
-                postGaps: {
-                    top: postTopGap,
-                    bottom: postBottomGap,
-                    left: postLeftGap,
-                    right: postRightGap
-                },
-                appliedMethod: appliedMethod,
-                dx: Math.round(dx * 100) / 100,
-                dy: Math.round(dy * 100) / 100
-            });
-        }
-        lastVideoNotesDiagnostics = diagnostics;
     }
 
     function updateMainAdaptiveScale() {
@@ -4310,6 +3951,7 @@
     }
 
     function onGlobalPointerDown(e) {
+        if (!e || !e.isTrusted) return;
         lastPointerX = e.clientX;
         lastPointerY = e.clientY;
         hideHoverTooltip();
@@ -4401,81 +4043,177 @@
     document.addEventListener('mouseleave', hideHoverTooltip, { passive: true });
     window.addEventListener('blur', hideHoverTooltip);
 
-    var videoNotesTimer = null;
     var mutationSyncRaf = null;
-    var pendingMainMutation = false;
+    var dirtyLayout = false;
+    var dirtyOverlay = false;
+    var dirtySideNav = false;
+    var dirtyPaneSide = false;
+    var dirtyMainChanged = false;
+    var dirtyTheme = false;
 
-    function scheduleVideoNotesSync() {
-        if (videoNotesTimer) return;
-        videoNotesTimer = setTimeout(function() {
-            videoNotesTimer = null;
-            window.requestAnimationFrame(function() {
-                tagVideoNotes();
-            });
-        }, 90);
+    var POPUP_MUTATION_SELECTOR = '[data-animate-picker], [data-animate-modal-popup], [role="dialog"], [role="menu"], [role="listbox"], [role="tablist"], #wa-privacy-blur-overlay';
+
+    function isInternalMutationNode(node) {
+        if (!node || node.nodeType !== 1) return false;
+        var id = node.id;
+        if (id === 'wa-compact-hover-tooltip' ||
+            id === 'wa-accent-probe' ||
+            id === 'wa-dynamic-wds-overrides' ||
+            id === 'wa-custom-resizer' ||
+            id === 'wa-right-resizer') {
+            return true;
+        }
+        return !!(node.classList && node.classList.contains('wa-alt-badge'));
     }
 
-    function attachMainVideoNotesListeners(mainNode) {
-        if (!mainNode || mainNode.__waVideoNotesListenersAttached) return;
-        mainNode.__waVideoNotesListenersAttached = true;
-        mainNode.addEventListener('load', function(ev) {
-            var t = ev && ev.target;
-            if (t && t.tagName && (t.tagName === 'IMG' || t.tagName === 'VIDEO')) {
-                scheduleVideoNotesSync();
+    function isInternalMutationRecord(mut) {
+        var tgt = mut.target;
+        if (!tgt) return false;
+        if (isInternalMutationNode(tgt)) return true;
+        if (mut.type === 'childList') {
+            var added = mut.addedNodes;
+            var removed = mut.removedNodes;
+            var hasAny = (added && added.length > 0) || (removed && removed.length > 0);
+            if (!hasAny) return true;
+            if (added) {
+                for (var a = 0; a < added.length; a++) {
+                    if (!isInternalMutationNode(added[a])) return false;
+                }
             }
-        }, true);
-        mainNode.addEventListener('loadeddata', function() {
-            scheduleVideoNotesSync();
-        }, true);
-        mainNode.addEventListener('scroll', function() {
-            scheduleVideoNotesSync();
-        }, { passive: true, capture: true });
+            if (removed) {
+                for (var r = 0; r < removed.length; r++) {
+                    if (!isInternalMutationNode(removed[r])) return false;
+                }
+            }
+            return true;
+        }
+        return false;
     }
 
-    var initMainNode = document.getElementById('main');
-    if (initMainNode) {
-        attachMainVideoNotesListeners(initMainNode);
+    function nodeMatchesOverlayOrPopup(node) {
+        if (!node || node.nodeType !== 1) return false;
+        if (node.matches && (node.matches(POPUP_MUTATION_SELECTOR) || node.matches(OVERLAY_CHECK_SELECTOR))) {
+            return true;
+        }
+        if (node.querySelector && node.querySelector(POPUP_MUTATION_SELECTOR)) {
+            return true;
+        }
+        return false;
     }
-    scheduleVideoNotesSync();
 
     var observer = new MutationObserver(function(mutations) {
         var onlyInternal = mutations.length > 0;
         var mainEl = document.getElementById('main');
-        var mainColEl = cachedMainColumn || document.querySelector('[data-wa-main-column="true"]');
+        var mainColEl = (cachedMainColumn && cachedMainColumn.isConnected)
+            ? cachedMainColumn
+            : document.querySelector('[data-wa-main-column="true"]');
+        var paneSideEl = document.getElementById('pane-side');
+        var sideEl = document.getElementById('side');
+        var mainHeaderEl = mainEl ? mainEl.querySelector('header') : null;
+        var mainFooterEl = mainEl ? mainEl.querySelector('footer') : null;
+        var tabShellEl = document.querySelector('[data-wa-tab-shell="true"]');
+        var rightColEl = document.querySelector('[data-wa-right-column="true"]');
         var hasAddedPopupOrMain = false;
         var isOpeningPickerNow = performance.now() < pickerOpeningUntil;
         var isAnimatingNow = document.body && document.body.classList.contains('wa-sidebar-animating');
         var addedGreenTargets = [];
+        var layoutInitialized = !!(sideEl && mainColEl && (sideEl.__waWidthApplied || sideEl.__waCompactApplied));
 
         for (var m = 0; m < mutations.length; m++) {
             var mut = mutations[m];
+            if (isInternalMutationRecord(mut)) continue;
+            onlyInternal = false;
+
             var tgt = mut.target;
-            if (!tgt || (tgt.id !== 'wa-compact-hover-tooltip' && tgt.id !== 'wa-accent-probe' && tgt.id !== 'wa-dynamic-wds-overrides')) {
-                onlyInternal = false;
+            var inPaneSide = !!(tgt && paneSideEl && (tgt === paneSideEl || paneSideEl.contains(tgt)));
+            var inMain = !!(tgt && mainEl && (tgt === mainEl || mainEl.contains(tgt)));
+            var inMainCol = !inMain && !!(tgt && mainColEl && (tgt === mainColEl || mainColEl.contains(tgt)));
+            var inSide = !inPaneSide && !!(tgt && sideEl && (tgt === sideEl || sideEl.contains(tgt)));
+            var inTabShell = !!(tgt && tabShellEl && (tgt === tabShellEl || tabShellEl.contains(tgt)));
+            var inRightCol = !!(tgt && rightColEl && (tgt === rightColEl || rightColEl.contains(tgt)));
+
+            if (!layoutInitialized) {
+                dirtyLayout = true;
             }
-            if (tgt) {
-                if ((mainEl && (tgt === mainEl || mainEl.contains(tgt) || tgt.contains(mainEl))) ||
-                    (mainColEl && (tgt === mainColEl || mainColEl.contains(tgt)))) {
-                    pendingMainMutation = true;
+
+            if (inPaneSide) {
+                dirtyPaneSide = true;
+            } else if (inMain) {
+                if (tgt === mainEl || (mainHeaderEl && (tgt === mainHeaderEl || mainHeaderEl.contains(tgt)))) {
+                    dirtyMainChanged = true;
+                    dirtyTheme = true;
+                } else if (mainFooterEl && (tgt === mainFooterEl || mainFooterEl.contains(tgt))) {
+                    if (isOpeningPickerNow || !(tgt.closest && tgt.closest('[contenteditable="true"], [role="textbox"]'))) {
+                        dirtyOverlay = true;
+                    }
                 }
+            } else if (inMainCol) {
+                dirtyMainChanged = true;
+                dirtyTheme = true;
+                if (isOpeningPickerNow) {
+                    dirtyOverlay = true;
+                }
+            } else if (inSide) {
+                dirtySideNav = true;
+            } else if (inTabShell) {
+                if (tgt === tabShellEl || !tabShellEl.querySelector('[data-wa-tab-side-column="true"]')) {
+                    dirtyLayout = true;
+                }
+            } else if (inRightCol) {
+                // Contenido interno del panel derecho: solo vigilar popups/overlays en added/removed
+            } else {
+                dirtyLayout = true;
+                dirtyOverlay = true;
             }
+
             if (mut.addedNodes && mut.addedNodes.length > 0) {
                 for (var an = 0; an < mut.addedNodes.length; an++) {
                     var added = mut.addedNodes[an];
-                    if (!added || added.nodeType !== 1) continue;
-                    if (added.id === 'main' || (added.querySelector && added.querySelector('#main, video, svg circle'))) {
-                        pendingMainMutation = true;
+                    if (!added || added.nodeType !== 1 || isInternalMutationNode(added)) continue;
+                    if (added.id === 'main') {
+                        dirtyMainChanged = true;
+                        dirtyTheme = true;
+                        if (!mainColEl) dirtyLayout = true;
+                    } else if (added.id === 'side' || added.id === 'pane-side') {
+                        dirtyLayout = true;
+                        dirtySideNav = true;
+                        dirtyTheme = true;
+                    } else if (!inPaneSide && added.querySelector && added.querySelector('#main')) {
+                        dirtyMainChanged = true;
+                        dirtyTheme = true;
+                        if (!mainColEl) dirtyLayout = true;
                     }
-                    if (!hasAddedPopupOrMain &&
-                        (isOpeningPickerNow ||
-                         (added.matches && added.matches('[data-animate-picker], [data-animate-modal-popup], [role="dialog"], [role="menu"], [role="listbox"]')) ||
-                         (added.querySelector && added.querySelector('[data-animate-picker], [data-animate-modal-popup], [role="dialog"], [role="menu"], [role="listbox"], [role="tablist"]')))) {
+
+                    if (isOpeningPickerNow ||
+                        (!inPaneSide && nodeMatchesOverlayOrPopup(added)) ||
+                        (inPaneSide && added.matches && added.matches(POPUP_MUTATION_SELECTOR))) {
                         hasAddedPopupOrMain = true;
+                        dirtyOverlay = true;
                     }
+
                     if (!isAnimatingNow && addedGreenTargets.length < 24 && added.closest &&
                         added.closest('#side, [data-wa-nav-rail="true"], [data-wa-side-column="true"], [data-wa-tab-side-column="true"], [data-wa-left-drawer="true"], #app > div > header')) {
                         addedGreenTargets.push(added);
                     }
+                }
+            }
+
+            if (mut.removedNodes && mut.removedNodes.length > 0 && (!dirtyOverlay || (!dirtyLayout && !inPaneSide && !inMain))) {
+                for (var rn = 0; rn < mut.removedNodes.length; rn++) {
+                    var rem = mut.removedNodes[rn];
+                    if (!rem || rem.nodeType !== 1 || isInternalMutationNode(rem)) continue;
+                    if (!dirtyOverlay && !inPaneSide && nodeMatchesOverlayOrPopup(rem)) {
+                        dirtyOverlay = true;
+                    }
+                    if (!dirtyLayout && !inPaneSide && !inMain &&
+                        (rem.id === 'side' ||
+                         (rem.getAttribute && (rem.getAttribute('data-wa-tab-shell') === 'true' ||
+                                               rem.getAttribute('data-wa-tab-side-column') === 'true' ||
+                                               rem.getAttribute('data-wa-right-column') === 'true' ||
+                                               rem.getAttribute('data-wa-left-drawer') === 'true')))) {
+                        dirtyLayout = true;
+                    }
+                    if (dirtyOverlay && (dirtyLayout || inPaneSide || inMain)) break;
                 }
             }
         }
@@ -4496,46 +4234,66 @@
         if (mutationSyncRaf) return;
         mutationSyncRaf = window.requestAnimationFrame(function() {
             mutationSyncRaf = null;
+            var runLayout = dirtyLayout;
+            var runOverlay = dirtyOverlay;
+            var runSideNav = dirtySideNav;
+            var runPaneSide = dirtyPaneSide;
+            var runMainChanged = dirtyMainChanged;
+            var runTheme = dirtyTheme;
+            dirtyLayout = false;
+            dirtyOverlay = false;
+            dirtySideNav = false;
+            dirtyPaneSide = false;
+            dirtyMainChanged = false;
+            dirtyTheme = false;
+
             var isAnimatingCompact = document.body && document.body.classList.contains('wa-sidebar-animating');
-            ensureToggleButton();
-            if (!isAnimatingCompact) {
+            if (runLayout || runSideNav) {
+                ensureToggleButton();
+            }
+            if (!isAnimatingCompact && (runLayout || runSideNav || (runPaneSide && isCompactActive()))) {
                 syncAvatarTooltips();
             }
-            observeThemeRoots();
-            if (window.__waEnsurePaneListeners) {
+            if (runLayout || runTheme) {
+                observeThemeRoots();
+            }
+            if ((runLayout || runPaneSide || runSideNav) && window.__waEnsurePaneListeners) {
                 window.__waEnsurePaneListeners();
             }
             if (!isAnimatingCompact) {
-                var c = resolveLayoutContainers();
-                if (c && c.flexContainer) {
-                    syncAuxDrawers(c.flexContainer, c.sideColumn, c.mainColumn);
-                }
-                ensureRightResizer();
-                updateRightResizerPosition();
-                ensureMainResizeObserver();
-                if (!isCompactActive()) {
-                    initResizer();
-                    var sEl = document.querySelector('#side');
-                    if (sEl && !sEl.__waWidthApplied) {
-                        sEl.__waWidthApplied = true;
-                        setSidebarWidth(currentSidebarWidth || getSavedWidth(), false);
+                if (runLayout) {
+                    var c = resolveLayoutContainers();
+                    if (c && c.flexContainer) {
+                        syncAuxDrawers(c.flexContainer, c.sideColumn, c.mainColumn);
                     }
-                } else if (document.querySelector('#side') &&
-                           (!document.querySelector('[data-wa-side-column="true"]') ||
-                            !document.querySelector('#side').__waCompactApplied)) {
-                    applyCompactInline();
+                    ensureRightResizer();
+                    updateRightResizerPosition();
+                    ensureMainResizeObserver();
+                    if (!isCompactActive()) {
+                        initResizer();
+                        var sEl = document.querySelector('#side');
+                        if (sEl && !sEl.__waWidthApplied) {
+                            sEl.__waWidthApplied = true;
+                            setSidebarWidth(currentSidebarWidth || getSavedWidth(), false);
+                        }
+                    } else if (document.querySelector('#side') &&
+                               (!document.querySelector('[data-wa-side-column="true"]') ||
+                                !document.querySelector('#side').__waCompactApplied)) {
+                        applyCompactInline();
+                    }
+                    scheduleMainScaleUpdate();
+                } else if (runMainChanged) {
+                    ensureMainResizeObserver();
+                    if (document.querySelector('[data-wa-right-column="true"]')) {
+                        scheduleMainScaleUpdate();
+                    }
                 }
-                scheduleMainScaleUpdate();
-                scheduleAccentSync(false);
+                if (runLayout || runTheme) {
+                    scheduleAccentSync(false);
+                }
             }
-            scheduleResizerOverlayCheck();
-            var curMain = document.getElementById('main');
-            if (curMain) {
-                attachMainVideoNotesListeners(curMain);
-            }
-            if (pendingMainMutation) {
-                pendingMainMutation = false;
-                scheduleVideoNotesSync();
+            if (runLayout || runOverlay) {
+                scheduleResizerOverlayCheck();
             }
         });
     });

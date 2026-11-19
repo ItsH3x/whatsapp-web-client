@@ -48,9 +48,12 @@ body,
 body .wa-alt-badge,
 body [data-wa-accent-bg="true"] {
     background-color: var(--wa-dynamic-accent, #00a884) !important;
-    color: var(--wa-dynamic-accent-fg, #111b21) !important;
     border: none !important;
     outline: none !important;
+}
+
+body .wa-alt-badge {
+    color: var(--wa-dynamic-accent-fg, #111b21) !important;
 }
 
 body [data-wa-accent-bg-light="true"] {
@@ -238,13 +241,6 @@ body:not(.wa-sidebar-compact) [data-wa-side-column="true"] > div > header {
     max-width: 100% !important;
     width: 100% !important;
     box-sizing: border-box !important;
-}
-
-/* Notas de video circulares en #main: preservar borde y barra de progreso nativos sin expandir el circulo interior */
-#main div[style*="border-radius: 50%"] > video,
-#main div[style*="border-radius: 9999px"] > video,
-#main [data-wa-video-note-inner="true"] video {
-    object-fit: cover !important;
 }
 
 /* Escalado adaptativo de #main cuando se comprime bajo el umbral legible */

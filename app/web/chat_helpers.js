@@ -576,36 +576,66 @@
 
     // 2. Funcion para obtener chats validos ignorando completamente la pestana de Archivados
     // y capturando todas las conversaciones visibles (fijadas, propias y normales) en su orden visual exacto.
-    window.__waGetValidChats = function(skipViewportFilter) {
+    var validChatsBatchCache = null;
+    var navBadgeTimer1 = null;
+    var navBadgeTimer2 = null;
+
+    function clearNavBadgeTimers() {
+        if (navBadgeTimer1 !== null) {
+            clearTimeout(navBadgeTimer1);
+            navBadgeTimer1 = null;
+        }
+        if (navBadgeTimer2 !== null) {
+            clearTimeout(navBadgeTimer2);
+            navBadgeTimer2 = null;
+        }
+    }
+
+    function computeValidChatsSnapshot() {
         if (window.__waEnsurePaneListeners) {
             window.__waEnsurePaneListeners();
         }
         var pane = document.getElementById('pane-side');
-        if (!pane || !isElementVisible(pane, 20, 20)) return [];
+        if (!pane || !isElementVisible(pane, 20, 20)) {
+            return { all: [], visible: [] };
+        }
         var paneRect = pane.getBoundingClientRect();
 
-        var isCandidateRowSize = function(node) {
-            if (!node || !node.isConnected) return false;
+        var getCandidateRowRect = function(node) {
+            if (!node || !node.isConnected) return null;
             if (node.getAttribute('data-wa-compact-hide') === 'true' ||
                 (node.classList && node.classList.contains('wa-archived-row')) ||
                 (node.closest && node.closest('[data-wa-compact-hide="true"]'))) {
-                return false;
+                return null;
+            }
+            var rect = node.getBoundingClientRect();
+            if (rect.width < 30 || rect.height < 40 || rect.height > 140) {
+                return null;
             }
             var cs = window.getComputedStyle(node);
-            if (!cs || cs.display === 'none' || cs.visibility === 'hidden') return false;
-            var rect = node.getBoundingClientRect();
-            return rect.width >= 30 && rect.height >= 40 && rect.height <= 140;
+            if (!cs || cs.display === 'none' || cs.visibility === 'hidden') {
+                return null;
+            }
+            return rect;
         };
 
-        var rawList = [];
+        var rawItems = [];
+        var rawSet = typeof Set === 'function' ? new Set() : null;
+        var hasRawNode = function(node) {
+            return rawSet ? rawSet.has(node) : rawItems.some(function(it) { return it.el === node; });
+        };
+        var pushRawNode = function(node) {
+            if (!node || hasRawNode(node)) return;
+            var rect = getCandidateRowRect(node);
+            if (!rect) return;
+            if (rawSet) rawSet.add(node);
+            rawItems.push({ el: node, top: rect.top, height: rect.height });
+        };
 
         // Estrategia A: Filas accesibles con role="row" o role="listitem"
         var roleNodes = pane.querySelectorAll('[role="row"], [role="listitem"]');
         for (var r = 0; r < roleNodes.length; r++) {
-            var node = roleNodes[r];
-            if (isCandidateRowSize(node) && rawList.indexOf(node) === -1) {
-                rawList.push(node);
-            }
+            pushRawNode(roleNodes[r]);
         }
 
         // Estrategia B: Celdas de la lista virtualizada con transform translateY o translate3d
@@ -613,42 +643,47 @@
         for (var v = 0; v < virtualNodes.length; v++) {
             var vNode = virtualNodes[v];
             var semRow = vNode.querySelector('[role="row"], [role="listitem"]') || vNode;
-            if (isCandidateRowSize(semRow) && rawList.indexOf(semRow) === -1 && rawList.indexOf(vNode) === -1) {
-                rawList.push(semRow);
+            if (!hasRawNode(semRow) && !hasRawNode(vNode)) {
+                pushRawNode(semRow);
             }
         }
 
         // Estrategia C: Fallback para estructuras con cell-frame-container
-        if (!rawList.length) {
+        if (!rawItems.length) {
             var cellFrames = pane.querySelectorAll('div[data-testid="cell-frame-container"]');
             for (var c = 0; c < cellFrames.length; c++) {
                 var cf = cellFrames[c];
                 var row = cf.closest('[role="row"], [role="listitem"]') || cf;
-                if (isCandidateRowSize(row) && rawList.indexOf(row) === -1) {
-                    rawList.push(row);
+                if (!pane.contains(row)) {
+                    row = cf;
                 }
+                pushRawNode(row);
             }
         }
 
-        // Deduplicacion jerarquica (evitar que un contenedor padre y su hijo figuren a la vez)
-        var dedupedList = [];
-        for (var i = 0; i < rawList.length; i++) {
-            var item = rawList[i];
+        // Deduplicacion jerarquica en O(N * profundidad) usando ancestros en lugar de O(N^2)
+        var dedupedItems = [];
+        for (var i = 0; i < rawItems.length; i++) {
+            var item = rawItems[i];
             var isContained = false;
-            for (var j = 0; j < rawList.length; j++) {
-                if (i !== j && rawList[j].contains(item)) {
+            var ancestor = item.el.parentElement;
+            while (ancestor && ancestor !== pane) {
+                if (hasRawNode(ancestor)) {
                     isContained = true;
                     break;
                 }
+                ancestor = ancestor.parentElement;
             }
-            if (!isContained && dedupedList.indexOf(item) === -1) {
-                dedupedList.push(item);
+            if (!isContained) {
+                dedupedItems.push(item);
             }
         }
 
-        var validChats = [];
-        for (var k = 0; k < dedupedList.length; k++) {
-            var el = dedupedList[k];
+        var validEntries = [];
+        var chatContentSelector = 'img, svg, span[data-icon], span[title], span[dir="auto"], div[data-testid*="cell-frame"], [data-wa-avatar-col="true"]';
+        for (var k = 0; k < dedupedItems.length; k++) {
+            var entry = dedupedItems[k];
+            var el = entry.el;
 
             // Deteccion de chat anclado / fijado (pin):
             // Si contiene el icono de fijado, es obligatoriamente un chat valido y NUNCA debe descartarse como archivado
@@ -681,34 +716,43 @@
             }
 
             // Verificar que contiene la estructura minima de un chat real (avatar o contenido de texto)
-            var hasChatContent = el.querySelector('img') ||
-                                 el.querySelector('svg') ||
-                                 el.querySelector('span[data-icon]') ||
-                                 el.querySelector('span[title]') ||
-                                 el.querySelector('span[dir="auto"]') ||
-                                 el.querySelector('div[data-testid*="cell-frame"]') ||
-                                 el.querySelector('[data-wa-avatar-col="true"]');
-            if (!hasChatContent) {
+            if (el.querySelector(chatContentSelector) === null) {
                 continue;
             }
 
-            if (!skipViewportFilter && paneRect.height > 0) {
-                var elRect = el.getBoundingClientRect();
-                var centerY = elRect.top + (elRect.height / 2);
-                if (centerY < paneRect.top || centerY > paneRect.bottom) {
-                    continue;
-                }
-            }
-
-            validChats.push(el);
+            validEntries.push(entry);
         }
 
-        // Ordenar visualmente de arriba a abajo por coordenada Y para que el primer chat visible sea siempre el indice 0
-        validChats.sort(function(a, b) {
-            return a.getBoundingClientRect().top - b.getBoundingClientRect().top;
+        // Ordenar visualmente usando la coordenada top cacheada (cero getBoundingClientRect dentro de sort)
+        validEntries.sort(function(a, b) {
+            return a.top - b.top;
         });
 
-        return validChats;
+        var allChats = new Array(validEntries.length);
+        var visibleChats = [];
+        var hasPaneHeight = paneRect.height > 0;
+        for (var m = 0; m < validEntries.length; m++) {
+            var ve = validEntries[m];
+            allChats[m] = ve.el;
+            if (hasPaneHeight) {
+                var centerY = ve.top + (ve.height / 2);
+                if (centerY >= paneRect.top && centerY <= paneRect.bottom) {
+                    visibleChats.push(ve.el);
+                }
+            } else {
+                visibleChats.push(ve.el);
+            }
+        }
+
+        return { all: allChats, visible: visibleChats };
+    }
+
+    window.__waGetValidChats = function(skipViewportFilter) {
+        if (validChatsBatchCache) {
+            return (skipViewportFilter ? validChatsBatchCache.all : validChatsBatchCache.visible).slice();
+        }
+        var snap = computeValidChatsSnapshot();
+        return skipViewportFilter ? snap.all : snap.visible;
     };
 
     // 3. Funcion para mostrar badges sobre la esquina de la foto de perfil sin depender de cell-frame-container
@@ -944,6 +988,17 @@
         var clientX = Math.round(rect.left + (rect.width > 0 ? rect.width / 2 : 10));
         var clientY = Math.round(rect.top + (rect.height > 0 ? rect.height / 2 : 10));
 
+        var needsScroll = true;
+        var paneForScroll = document.getElementById('pane-side');
+        if (paneForScroll) {
+            var paneRectForScroll = paneForScroll.getBoundingClientRect();
+            var targetRectForScroll = (target === clickTarget) ? rect : target.getBoundingClientRect();
+            if (paneRectForScroll.height > 0 && targetRectForScroll.height > 0) {
+                needsScroll = (targetRectForScroll.top < paneRectForScroll.top - 1) ||
+                              (targetRectForScroll.bottom > paneRectForScroll.bottom + 1);
+            }
+        }
+
         var commonOpts = {
             bubbles: true,
             cancelable: true,
@@ -966,7 +1021,11 @@
         clickTarget.dispatchEvent(new MouseEvent('mousedown', downOpts));
 
         if (typeof target.focus === 'function') {
-            try { target.focus(); } catch (e) {}
+            try {
+                target.focus({ preventScroll: true });
+            } catch (e) {
+                try { target.focus(); } catch (e2) {}
+            }
         }
 
         var upOpts = Object.assign({}, commonOpts, { button: 0, buttons: 0 });
@@ -980,17 +1039,16 @@
         clickTarget.dispatchEvent(new MouseEvent('mouseup', upOpts));
         clickTarget.dispatchEvent(new MouseEvent('click', upOpts));
 
-        if (typeof clickTarget.click === 'function') {
-            try { clickTarget.click(); } catch (e) {}
-        }
-
-        if (typeof target.scrollIntoView === 'function') {
+        var didScroll = false;
+        if (needsScroll && typeof target.scrollIntoView === 'function') {
             target.scrollIntoView({ block: 'nearest', behavior: 'auto' });
+            didScroll = true;
         }
 
         if (!preserveSeenState && !window.__waMarkingSeenActive && typeof window.__waScheduleReadOnlyChatCheck === 'function') {
             window.__waScheduleReadOnlyChatCheck();
         }
+        return didScroll;
     };
 
     // 6. Obtener el indice del chat seleccionado actualmente
@@ -1056,55 +1114,76 @@
 
     // 7. Navegacion secuencial por chats (+1 abajo, -1 arriba)
     window.__waNavigateChat = function(offset) {
-        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats(true) : [];
+        var snap = computeValidChatsSnapshot();
+        var validChats = snap.all;
         if (!validChats.length) return -1;
 
-        var currentIndex = window.__waGetCurrentChatIndex(true);
-        var targetIndex = 0;
+        validChatsBatchCache = snap;
+        try {
+            var currentIndex = window.__waGetCurrentChatIndex(true);
+            var targetIndex = 0;
 
-        if (currentIndex === -1) {
-            var visibleChats = window.__waGetValidChats(false);
-            if (visibleChats.length) {
-                var firstVisibleIdx = validChats.indexOf(visibleChats[0]);
-                if (firstVisibleIdx !== -1) {
-                    targetIndex = firstVisibleIdx;
+            if (currentIndex === -1) {
+                var visibleChats = snap.visible;
+                if (visibleChats.length) {
+                    var firstVisibleIdx = validChats.indexOf(visibleChats[0]);
+                    if (firstVisibleIdx !== -1) {
+                        targetIndex = firstVisibleIdx;
+                    }
+                }
+            } else {
+                targetIndex = currentIndex + offset;
+                if (targetIndex < 0) {
+                    targetIndex = 0;
+                } else if (targetIndex >= validChats.length) {
+                    targetIndex = validChats.length - 1;
                 }
             }
-        } else {
-            targetIndex = currentIndex + offset;
-            if (targetIndex < 0) {
-                targetIndex = 0;
-            } else if (targetIndex >= validChats.length) {
-                targetIndex = validChats.length - 1;
-            }
-        }
 
-        if (targetIndex === currentIndex && currentIndex !== -1) {
+            if (targetIndex === currentIndex && currentIndex !== -1) {
+                if (window.__waShowAltBadges && window.__waAltKeyDown) {
+                    window.__waShowAltBadges();
+                }
+                return targetIndex;
+            }
+
+            window.__waCurrentChatIndex = targetIndex;
+            window.__waHasRepliedInCurrentChat = false;
+            window.__waMarkingSeenActive = false;
+            if (window.__waCancelTemporarySeen) {
+                window.__waCancelTemporarySeen();
+            }
+
+            var target = validChats[targetIndex];
+            var didScroll = false;
+            if (target && window.__waSelectChatElement) {
+                didScroll = !!window.__waSelectChatElement(target);
+            }
+            if (didScroll) {
+                validChatsBatchCache = null;
+            }
+
+            clearNavBadgeTimers();
             if (window.__waShowAltBadges && window.__waAltKeyDown) {
                 window.__waShowAltBadges();
+                navBadgeTimer1 = setTimeout(function() {
+                    navBadgeTimer1 = null;
+                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
+                        window.__waShowAltBadges();
+                    }
+                }, 90);
+                navBadgeTimer2 = setTimeout(function() {
+                    navBadgeTimer2 = null;
+                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
+                        window.__waShowAltBadges();
+                    }
+                }, 240);
             }
+
             return targetIndex;
+        } finally {
+            validChatsBatchCache = null;
         }
-
-        window.__waCurrentChatIndex = targetIndex;
-        window.__waHasRepliedInCurrentChat = false;
-        window.__waMarkingSeenActive = false;
-        if (window.__waCancelTemporarySeen) {
-            window.__waCancelTemporarySeen();
-        }
-
-        var target = validChats[targetIndex];
-        if (target && window.__waSelectChatElement) {
-            window.__waSelectChatElement(target);
-        }
-
-        if (window.__waShowAltBadges && window.__waAltKeyDown) {
-            window.__waShowAltBadges();
-            setTimeout(function() { if (window.__waAltKeyDown && window.__waShowAltBadges) window.__waShowAltBadges(); }, 90);
-            setTimeout(function() { if (window.__waAltKeyDown && window.__waShowAltBadges) window.__waShowAltBadges(); }, 240);
-        }
-
-        return targetIndex;
     };
 
     // 7b. Busqueda de chat por nombre con scroll progresivo sobre la lista virtualizada de #pane-side
@@ -1225,54 +1304,131 @@
         return 0;
     };
 
-    // 8. Escuchadores directos de teclado y rueda dentro de la ventana web
+    // 8. Escuchadores directos de teclado y badges dentro de la ventana web
+    // Nota: Alt + Wheel se intercepta de forma nativa en C++ (whatsapp_window.cpp);
+    // no registrar listeners wheel { passive: false } en JS para preservar el scroll GPU compositor.
     if (!window.__waAltListenersAttached) {
         window.__waAltListenersAttached = true;
         window.__waAltKeyDown = false;
-        window.__waLastWheelNavTime = 0;
 
-        function handleWheel(e) {
-            var isAltGr = (e.getModifierState && e.getModifierState('AltGraph')) || (e.altKey && e.ctrlKey);
-            if (isAltGr && window.__waAltKeyDown) {
-                window.__waAltKeyDown = false;
-                if (window.__waHideAltBadges) {
-                    window.__waHideAltBadges();
+        var observedBadgePane = null;
+        var BADGE_OBSERVER_OPTS = {
+            childList: true,
+            subtree: true,
+            attributes: true,
+            attributeFilter: ['style', 'class', 'aria-selected', 'data-wa-compact-hide']
+        };
+
+        var ensurePaneBadgeObserver = function(pane) {
+            if (!pane || pane.__waBadgeObserver || !window.MutationObserver) return;
+            var isBadgeNode = function(node) {
+                return node && node.nodeType === 1 && node.classList && node.classList.contains('wa-alt-badge');
+            };
+            var isOnlyBadgeMutation = function(m) {
+                if (m.type === 'attributes') {
+                    return isBadgeNode(m.target);
                 }
+                if (m.type === 'characterData') {
+                    return isBadgeNode(m.target && m.target.parentNode);
+                }
+                if (m.type === 'childList') {
+                    if (isBadgeNode(m.target)) {
+                        return true;
+                    }
+                    for (var a = 0; a < m.addedNodes.length; a++) {
+                        if (!isBadgeNode(m.addedNodes[a])) {
+                            return false;
+                        }
+                    }
+                    for (var r = 0; r < m.removedNodes.length; r++) {
+                        if (!isBadgeNode(m.removedNodes[r])) {
+                            return false;
+                        }
+                    }
+                    return true;
+                }
+                return false;
+            };
+            pane.__waBadgeObserver = new MutationObserver(function(mutations) {
+                if (!window.__waAltKeyDown) return;
+                var hasRelevant = false;
+                for (var i = 0; i < mutations.length; i++) {
+                    if (!isOnlyBadgeMutation(mutations[i])) {
+                        hasRelevant = true;
+                        break;
+                    }
+                }
+                if (!hasRelevant || pane.__waBadgeMutRaf) return;
+                pane.__waBadgeMutRaf = true;
+                window.requestAnimationFrame(function() {
+                    pane.__waBadgeMutRaf = false;
+                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
+                        window.__waShowAltBadges();
+                    }
+                });
+            });
+            pane.__waBadgeObserverConnected = false;
+        };
+
+        var syncBadgeObserver = function(shouldObserve) {
+            if (!shouldObserve) {
+                clearNavBadgeTimers();
+                if (observedBadgePane && observedBadgePane.__waBadgeObserver && observedBadgePane.__waBadgeObserverConnected) {
+                    observedBadgePane.__waBadgeObserver.disconnect();
+                    observedBadgePane.__waBadgeObserverConnected = false;
+                    observedBadgePane.__waBadgeMutRaf = false;
+                }
+                var curPaneOff = document.getElementById('pane-side');
+                if (curPaneOff && curPaneOff !== observedBadgePane && curPaneOff.__waBadgeObserver && curPaneOff.__waBadgeObserverConnected) {
+                    curPaneOff.__waBadgeObserver.disconnect();
+                    curPaneOff.__waBadgeObserverConnected = false;
+                    curPaneOff.__waBadgeMutRaf = false;
+                }
+                observedBadgePane = null;
+                return;
             }
-            var isAlt = !isAltGr && (e.altKey || window.__waAltKeyDown);
-            if (isAlt) {
-                e.preventDefault();
-                e.stopPropagation();
-                e.stopImmediatePropagation();
 
-                var now = Date.now();
-                if (now - window.__waLastWheelNavTime < 100) {
-                    return;
-                }
-
-                var delta = e.deltaY;
-                if (delta === 0 && e.deltaX !== 0) {
-                    delta = e.deltaX;
-                }
-
-                if (delta < 0) {
-                    window.__waLastWheelNavTime = now;
-                    window.__waNavigateChat(-1);
-                } else if (delta > 0) {
-                    window.__waLastWheelNavTime = now;
-                    window.__waNavigateChat(1);
-                }
+            var pane = document.getElementById('pane-side');
+            if (!pane) return;
+            if (observedBadgePane && observedBadgePane !== pane && observedBadgePane.__waBadgeObserver && observedBadgePane.__waBadgeObserverConnected) {
+                observedBadgePane.__waBadgeObserver.disconnect();
+                observedBadgePane.__waBadgeObserverConnected = false;
+                observedBadgePane.__waBadgeMutRaf = false;
             }
+            ensurePaneBadgeObserver(pane);
+            if (pane.__waBadgeObserver && !pane.__waBadgeObserverConnected) {
+                pane.__waBadgeObserver.observe(pane, BADGE_OBSERVER_OPTS);
+                pane.__waBadgeObserverConnected = true;
+                observedBadgePane = pane;
+            }
+        };
+        window.__waSyncBadgeObserver = syncBadgeObserver;
+
+        if (typeof window.__waShowAltBadges === 'function' && !window.__waShowAltBadges.__waObsWrapped) {
+            var origShowAltBadges = window.__waShowAltBadges;
+            var wrappedShowAltBadges = function() {
+                var result = origShowAltBadges.apply(this, arguments);
+                if (window.__waAltKeyDown) {
+                    syncBadgeObserver(true);
+                }
+                return result;
+            };
+            wrappedShowAltBadges.__waObsWrapped = true;
+            window.__waShowAltBadges = wrappedShowAltBadges;
         }
-        window.__waHandleWheel = handleWheel;
+        if (typeof window.__waHideAltBadges === 'function' && !window.__waHideAltBadges.__waObsWrapped) {
+            var origHideAltBadges = window.__waHideAltBadges;
+            var wrappedHideAltBadges = function() {
+                syncBadgeObserver(false);
+                return origHideAltBadges.apply(this, arguments);
+            };
+            wrappedHideAltBadges.__waObsWrapped = true;
+            window.__waHideAltBadges = wrappedHideAltBadges;
+        }
 
         window.__waEnsurePaneListeners = function() {
             var pane = document.getElementById('pane-side');
             if (!pane) return;
-            if (!pane.__waWheelAttached) {
-                pane.__waWheelAttached = true;
-                pane.addEventListener('wheel', window.__waHandleWheel, { passive: false, capture: true });
-            }
             if (!pane.__waScrollBadgeAttached) {
                 pane.__waScrollBadgeAttached = true;
                 var badgeRaf = false;
@@ -1287,58 +1443,9 @@
                     });
                 }, { passive: true });
             }
-            if (!pane.__waBadgeObserver && window.MutationObserver) {
-                var isBadgeNode = function(node) {
-                    return node && node.nodeType === 1 && node.classList && node.classList.contains('wa-alt-badge');
-                };
-                var isOnlyBadgeMutation = function(m) {
-                    if (m.type === 'attributes') {
-                        return isBadgeNode(m.target);
-                    }
-                    if (m.type === 'characterData') {
-                        return isBadgeNode(m.target && m.target.parentNode);
-                    }
-                    if (m.type === 'childList') {
-                        if (isBadgeNode(m.target)) {
-                            return true;
-                        }
-                        for (var a = 0; a < m.addedNodes.length; a++) {
-                            if (!isBadgeNode(m.addedNodes[a])) {
-                                return false;
-                            }
-                        }
-                        for (var r = 0; r < m.removedNodes.length; r++) {
-                            if (!isBadgeNode(m.removedNodes[r])) {
-                                return false;
-                            }
-                        }
-                        return true;
-                    }
-                    return false;
-                };
-                pane.__waBadgeObserver = new MutationObserver(function(mutations) {
-                    if (!window.__waAltKeyDown) return;
-                    var hasRelevant = false;
-                    for (var i = 0; i < mutations.length; i++) {
-                        if (!isOnlyBadgeMutation(mutations[i])) {
-                            hasRelevant = true;
-                            break;
-                        }
-                    }
-                    if (!hasRelevant || pane.__waBadgeMutRaf) return;
-                    pane.__waBadgeMutRaf = true;
-                    window.requestAnimationFrame(function() {
-                        pane.__waBadgeMutRaf = false;
-                        if (window.__waAltKeyDown && window.__waShowAltBadges) {
-                            window.__waShowAltBadges();
-                        }
-                    });
-                });
-                pane.__waBadgeObserver.observe(pane, {
-                    childList: true,
-                    subtree: true,
-                    attributes: true
-                });
+            ensurePaneBadgeObserver(pane);
+            if (window.__waAltKeyDown) {
+                syncBadgeObserver(true);
             }
         };
 
@@ -1351,6 +1458,7 @@
             if (isAltGrEvent) {
                 if (window.__waAltKeyDown) {
                     window.__waAltKeyDown = false;
+                    syncBadgeObserver(false);
                     window.__waHideAltBadges();
                 }
                 return;
@@ -1359,36 +1467,30 @@
                 e.code !== 'AltRight' &&
                 e.location !== 2 &&
                 !(e.getModifierState && e.getModifierState('AltGraph'))) {
-                // Solo se marca el estado: C++ (eventFilter) es el unico que muestra los badges,
-                // evitando una segunda reconstruccion por la misma pulsacion.
+                // Solo se marca el estado y se activa el observer mientras Alt este pulsado:
+                // C++ (eventFilter) es el unico que muestra los badges.
                 window.__waAltKeyDown = true;
+                syncBadgeObserver(true);
             }
         }, true);
 
         window.addEventListener('keyup', function(e) {
             if (e.key === 'Alt' || e.key === 'AltGraph' || e.code === 'AltRight') {
                 window.__waAltKeyDown = false;
+                syncBadgeObserver(false);
                 window.__waHideAltBadges();
             }
         }, true);
 
-        if (!window.__waGlobalScrollBadgeAttached) {
-            window.__waGlobalScrollBadgeAttached = true;
-            var globalBadgeScrollRaf = false;
-            window.addEventListener('scroll', function() {
-                if (!window.__waAltKeyDown || globalBadgeScrollRaf) return;
-                globalBadgeScrollRaf = true;
-                window.requestAnimationFrame(function() {
-                    globalBadgeScrollRaf = false;
-                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
-                        window.__waShowAltBadges();
-                    }
-                });
-            }, { passive: true, capture: true });
-        }
-
-        window.addEventListener('wheel', handleWheel, { passive: false, capture: true });
-        document.addEventListener('wheel', handleWheel, { passive: false, capture: true });
+        window.addEventListener('blur', function() {
+            if (window.__waAltKeyDown) {
+                window.__waAltKeyDown = false;
+                syncBadgeObserver(false);
+                if (window.__waHideAltBadges) {
+                    window.__waHideAltBadges();
+                }
+            }
+        });
     }
     if (window.__waEnsurePaneListeners) {
         window.__waEnsurePaneListeners();

@@ -4,6 +4,7 @@
 #include <QColor>
 #include <QCoreApplication>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QKeySequence>
@@ -318,6 +319,91 @@ void WhatsAppClient::resizeEvent(QResizeEvent *event) {
     }
 }
 
+// Deduplica eventos QEvent::Wheel (incluyendo timestamp == 0 en Wayland) y acumula delta
+// con umbral unificado para que cada paso de rueda salte exactamente 1 chat.
+// Devuelve -1 (chat anterior), +1 (chat siguiente) o 0 (deduplicado o bajo el umbral).
+static int consumeAltWheelStep(QWheelEvent *wheelEv, int &accumulatedDelta) {
+    if (!wheelEv) {
+        return 0;
+    }
+
+    int delta = wheelEv->angleDelta().y();
+    bool hasAngleDelta = (delta != 0);
+    if (!hasAngleDelta) {
+        delta = wheelEv->angleDelta().x();
+        hasAngleDelta = (delta != 0);
+    }
+    if (!hasAngleDelta && !wheelEv->pixelDelta().isNull()) {
+        delta = wheelEv->pixelDelta().y();
+        if (delta == 0) {
+            delta = wheelEv->pixelDelta().x();
+        }
+    }
+
+    if (delta == 0) {
+        return 0;
+    }
+
+    static QElapsedTimer wheelTimer;
+    if (!wheelTimer.isValid()) {
+        wheelTimer.start();
+    }
+    const qint64 nowMs = wheelTimer.elapsed();
+
+    static quint64 lastWheelTimestamp = 0;
+    static qint64 lastWheelEventMs = -1;
+    static qint64 lastZeroTsMs = -1;
+    static int lastZeroTsDelta = 0;
+    static QPointF lastZeroTsGlobalPos;
+    static const QWheelEvent *lastWheelEventPtr = nullptr;
+
+    const quint64 wheelTimestamp = wheelEv->timestamp();
+    if (wheelTimestamp != 0) {
+        if (wheelTimestamp == lastWheelTimestamp) {
+            return 0;
+        }
+        lastWheelTimestamp = wheelTimestamp;
+    } else {
+        const QPointF gPos = wheelEv->globalPosition();
+        const bool sameEventPtr = (wheelEv == lastWheelEventPtr &&
+                                   lastWheelEventMs >= 0 &&
+                                   (nowMs - lastWheelEventMs) <= 4);
+        const bool sameZeroTsDup = (lastZeroTsMs >= 0 &&
+                                    (nowMs - lastZeroTsMs) <= 4 &&
+                                    delta == lastZeroTsDelta &&
+                                    gPos == lastZeroTsGlobalPos);
+        if (sameEventPtr || sameZeroTsDup) {
+            return 0;
+        }
+        lastZeroTsMs = nowMs;
+        lastZeroTsDelta = delta;
+        lastZeroTsGlobalPos = gPos;
+    }
+
+    if (lastWheelEventMs >= 0 && (nowMs - lastWheelEventMs) > 350) {
+        accumulatedDelta = 0;
+    }
+    lastWheelEventMs = nowMs;
+    lastWheelEventPtr = wheelEv;
+
+    if ((delta > 0 && accumulatedDelta < 0) || (delta < 0 && accumulatedDelta > 0)) {
+        accumulatedDelta = 0;
+    }
+
+    accumulatedDelta += delta;
+    const int stepThreshold = hasAngleDelta ? 120 : 40;
+
+    if (accumulatedDelta >= stepThreshold) {
+        accumulatedDelta = 0;
+        return -1; // Rueda arriba -> Chat anterior
+    }
+    if (accumulatedDelta <= -stepThreshold) {
+        accumulatedDelta = 0;
+        return 1;  // Rueda abajo -> Chat siguiente
+    }
+    return 0;
+}
+
 void WhatsAppClient::wheelEvent(QWheelEvent *event) {
     Qt::KeyboardModifiers mods = event->modifiers();
     Qt::KeyboardModifiers appMods = QApplication::keyboardModifiers();
@@ -331,20 +417,9 @@ void WhatsAppClient::wheelEvent(QWheelEvent *event) {
     bool altPressed = (m_altKeyDown || sysAlt) && !hasAltGr;
 
     if (altPressed) {
-        int delta = event->angleDelta().y();
-        if (delta == 0) {
-            delta = event->angleDelta().x();
-        }
-        if (delta == 0 && !event->pixelDelta().isNull()) {
-            delta = event->pixelDelta().y();
-            if (delta == 0) {
-                delta = event->pixelDelta().x();
-            }
-        }
-        if (delta > 0) {
-            navigateChatByOffset(-1);
-        } else if (delta < 0) {
-            navigateChatByOffset(1);
+        const int navOffset = consumeAltWheelStep(event, m_wheelAccumulatedDelta);
+        if (navOffset != 0) {
+            navigateChatByOffset(navOffset);
         }
         event->accept();
         return;
@@ -412,42 +487,9 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
         bool altPressed = (m_altKeyDown || sysAlt) && !hasAltGr;
 
         if (altPressed) {
-            static quint64 lastWheelTimestamp = 0;
-            const quint64 wheelTimestamp = wheelEv->timestamp();
-            if (wheelTimestamp != 0 && wheelTimestamp == lastWheelTimestamp) {
-                wheelEv->accept();
-                return true;
-            }
-            if (wheelTimestamp != 0) {
-                lastWheelTimestamp = wheelTimestamp;
-            }
-
-            int delta = wheelEv->angleDelta().y();
-            if (delta == 0) {
-                delta = wheelEv->angleDelta().x();
-            }
-            if (delta == 0 && !wheelEv->pixelDelta().isNull()) {
-                delta = wheelEv->pixelDelta().y();
-                if (delta == 0) {
-                    delta = wheelEv->pixelDelta().x();
-                }
-            }
-
-            if (delta != 0) {
-                if ((delta > 0 && m_wheelAccumulatedDelta < 0) || (delta < 0 && m_wheelAccumulatedDelta > 0)) {
-                    m_wheelAccumulatedDelta = 0;
-                }
-
-                m_wheelAccumulatedDelta += delta;
-                const int stepThreshold = 40;
-
-                if (m_wheelAccumulatedDelta >= stepThreshold) {
-                    m_wheelAccumulatedDelta = 0;
-                    navigateChatByOffset(-1); // Rueda arriba -> Chat anterior
-                } else if (m_wheelAccumulatedDelta <= -stepThreshold) {
-                    m_wheelAccumulatedDelta = 0;
-                    navigateChatByOffset(1);  // Rueda abajo -> Chat siguiente
-                }
+            const int navOffset = consumeAltWheelStep(wheelEv, m_wheelAccumulatedDelta);
+            if (navOffset != 0) {
+                navigateChatByOffset(navOffset);
             }
             wheelEv->accept();
             return true;
