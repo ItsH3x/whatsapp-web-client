@@ -816,9 +816,9 @@ body.wa-sidebar-compact #pane-side::-webkit-scrollbar {
     display: none !important;
 }
 
-/* Filas y celdas del listado de chats en modo compacto */
-body.wa-sidebar-compact #pane-side [role="row"]:not([data-wa-compact-hide="true"]),
-body.wa-sidebar-compact #pane-side [role="listitem"]:not([data-wa-compact-hide="true"]) {
+/* Filas y celdas del listado de chats en modo compacto (aislado al panel de Chats) */
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [role="row"]:not([data-wa-compact-hide="true"]),
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [role="listitem"]:not([data-wa-compact-hide="true"]) {
     width: 100% !important;
     max-width: 100% !important;
     min-width: 0 !important;
@@ -831,11 +831,11 @@ body.wa-sidebar-compact #pane-side [role="listitem"]:not([data-wa-compact-hide="
     overflow: visible !important;
 }
 
-body.wa-sidebar-compact #pane-side [role="row"]:not([data-wa-compact-hide="true"]) > div:not([role="gridcell"]):not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
-body.wa-sidebar-compact #pane-side [role="listitem"]:not([data-wa-compact-hide="true"]) > div:not([role="gridcell"]):not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
-body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:not([role="row"]):not([role="listitem"]):not([data-wa-compact-hide="true"]),
-body.wa-sidebar-compact #pane-side div:has(> [data-wa-avatar-col="true"]):not([role="row"]):not([role="listitem"]),
-body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) div:has([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"]):not([data-wa-compact-hide="true"]) {
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side :is([role="row"], [role="listitem"]):not([data-wa-compact-hide="true"]) > div:not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side :is([role="row"], [role="listitem"]):not([data-wa-compact-hide="true"]) > div:not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]) > div:not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side :is([role="row"], [role="listitem"]):not([data-wa-compact-hide="true"]) > div:not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]) > div:not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]) > div:not([data-wa-avatar-col="true"]):not([data-wa-text-col="true"]):not([data-wa-compact-hide="true"]),
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side div[data-testid="cell-frame-container"]:not([data-wa-compact-hide="true"]),
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side div[data-testid="message-yourself-row"]:not([data-wa-compact-hide="true"]) {
     width: 100% !important;
     max-width: 100% !important;
     min-width: 0 !important;
@@ -844,6 +844,13 @@ body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) div:has(
     margin: 0 !important;
     gap: 0 !important;
     column-gap: 0 !important;
+    left: auto !important;
+    right: auto !important;
+    top: auto !important;
+    bottom: auto !important;
+    inset: auto !important;
+    inset-inline: auto !important;
+    transform: none !important;
     display: flex !important;
     justify-content: center !important;
     align-items: center !important;
@@ -853,30 +860,21 @@ body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) div:has(
 }
 
 /* Ocultacion universal de texto, fecha, preview, badges nativos y chinchetas (preservando .wa-alt-badge) */
-body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not(:has([data-wa-avatar-col="true"])),
-body.wa-sidebar-compact #pane-side [role="row"] > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not(:has([data-wa-avatar-col="true"])),
-body.wa-sidebar-compact #pane-side [role="listitem"] > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not(:has([data-wa-avatar-col="true"])),
-body.wa-sidebar-compact #pane-side [role="row"] > div > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *):not(:has([data-wa-avatar-col="true"])),
-body.wa-sidebar-compact #pane-side [role="listitem"] > div > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *):not(:has([data-wa-avatar-col="true"])),
-body.wa-sidebar-compact #pane-side [role="row"] div:has(> img) ~ *:not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *),
-body.wa-sidebar-compact #pane-side [role="listitem"] div:has(> img) ~ *:not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *),
-body.wa-sidebar-compact #pane-side [role="row"] div[role="button"] ~ *:not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *),
-body.wa-sidebar-compact #pane-side [role="listitem"] div[role="button"] ~ *:not(.wa-alt-badge):not([data-wa-avatar-col="true"]):not([data-wa-avatar-col="true"] *),
-body.wa-sidebar-compact #pane-side [role="gridcell"]:not(:has(img)):not(:has(svg)),
-body.wa-sidebar-compact #pane-side [data-wa-text-col="true"],
-body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) [data-wa-text-col="true"],
-body.wa-sidebar-compact #pane-side [data-wa-compact-hide="true"],
-body.wa-sidebar-compact #pane-side [data-testid="cell-frame-title"],
-body.wa-sidebar-compact #pane-side [data-testid="cell-frame-primary"],
-body.wa-sidebar-compact #pane-side [data-testid="cell-frame-secondary"],
-body.wa-sidebar-compact #pane-side [data-testid="last-msg-status"],
-body.wa-sidebar-compact #pane-side span[data-testid="chat-title"],
-body.wa-sidebar-compact #pane-side [data-icon*="pin"],
-body.wa-sidebar-compact #pane-side [data-testid="pinned"],
-body.wa-sidebar-compact #pane-side [data-testid="pin"],
-body.wa-sidebar-compact #pane-side [data-icon*="verified"],
-body.wa-sidebar-compact #pane-side [data-icon="unread-count"],
-body.wa-sidebar-compact #pane-side [data-testid="icon-unread-count"] {
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side :is(div[data-testid="cell-frame-container"], div[data-testid="message-yourself-row"]) > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]),
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side :is([role="row"], [role="listitem"]) > :not(:first-child):not(.wa-alt-badge):not([data-wa-avatar-col="true"]),
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-wa-text-col="true"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-wa-compact-hide="true"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-testid="cell-frame-title"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-testid="cell-frame-primary"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-testid="cell-frame-secondary"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-testid="last-msg-status"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-testid="chat-title"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-icon*="pin"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-testid="pinned"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-testid="pin"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-icon*="verified"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-icon="unread-count"],
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-testid="icon-unread-count"] {
     display: none !important;
     width: 0 !important;
     min-width: 0 !important;
@@ -891,30 +889,7 @@ body.wa-sidebar-compact #pane-side [data-testid="icon-unread-count"] {
     pointer-events: none !important;
 }
 
-body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"] {
-    margin: 0 auto !important;
-    padding: 0 !important;
-    left: auto !important;
-    right: auto !important;
-    top: auto !important;
-    bottom: auto !important;
-    inset: auto !important;
-    inset-inline: auto !important;
-}
-
-body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) div:has([data-wa-avatar-col="true"]) {
-    margin: 0 auto !important;
-    padding: 0 !important;
-    left: auto !important;
-    right: auto !important;
-    top: auto !important;
-    bottom: auto !important;
-    inset: auto !important;
-    inset-inline: auto !important;
-    transform: none !important;
-}
-
-body.wa-sidebar-compact #pane-side .wa-alt-badge {
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side .wa-alt-badge {
     display: flex !important;
     visibility: visible !important;
     opacity: 1 !important;
@@ -922,31 +897,29 @@ body.wa-sidebar-compact #pane-side .wa-alt-badge {
     height: 20px !important;
 }
 
-/* Columna del avatar: Dimension flexible (49px..64px) para permitir que los aros de estado (~54..56px) rodeen la foto a escala real */
-body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"],
-body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]) [data-wa-avatar-col="true"] {
+/* Columna del avatar: conservar display y padding nativos para no descuadrar foto y aros SVG de 2+ estados */
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-wa-avatar-col="true"] {
     width: auto !important;
-    min-width: 49px !important;
-    max-width: 64px !important;
+    min-width: 48px !important;
+    max-width: none !important;
     height: auto !important;
-    min-height: 49px !important;
-    max-height: 64px !important;
-    margin: 0 auto !important;
-    padding: 0 !important;
+    min-height: 48px !important;
+    max-height: none !important;
+    margin: 0 !important;
+    left: auto !important;
+    right: auto !important;
+    top: auto !important;
+    bottom: auto !important;
+    inset: auto !important;
+    inset-inline: auto !important;
     position: relative !important;
-    display: flex !important;
-    justify-content: center !important;
-    align-items: center !important;
     flex: 0 0 auto !important;
     box-sizing: border-box !important;
     overflow: visible !important;
 }
 
-/* Imagen de perfil del avatar conservando su escala y posicion nativa respecto al aro SVG de estado */
-body.wa-sidebar-compact #pane-side [role="row"] img,
-body.wa-sidebar-compact #pane-side [role="listitem"] img,
-body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"] img,
-body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] img {
+/* Imagen de perfil del avatar conservando escala, border-radius y posicion nativos */
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-wa-avatar-col="true"] img {
     max-width: 56px !important;
     max-height: 56px !important;
     object-fit: cover !important;
@@ -954,56 +927,32 @@ body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"] img {
     flex-shrink: 0 !important;
 }
 
-/* Avatares circulares para chats estandar (usuarios, grupos y canales) */
-body.wa-sidebar-compact #pane-side [role="row"]:not(:has([data-icon*="community"])) img,
-body.wa-sidebar-compact #pane-side [role="listitem"]:not(:has([data-icon*="community"])) img,
-body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"]:not(:has([data-icon*="community"])) img,
-body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:not(:has([data-icon*="community"])) img {
-    border-radius: 50% !important;
-}
-
-/* Iconos squircle (circulo cuadrado) para comunidades */
-body.wa-sidebar-compact #pane-side :is([role="row"], [role="listitem"]):has([data-icon*="community"]) img,
-body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"]:has([data-icon*="community"]) img,
-body.wa-sidebar-compact #pane-side div[data-testid="cell-frame-container"]:has([data-icon*="community"]) img,
-body.wa-sidebar-compact #pane-side span[data-icon*="community"] svg,
-body.wa-sidebar-compact #pane-side span[data-icon*="community"] {
+/* Iconos squircle para comunidades cuando usan span[data-icon*="community"] */
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="community"] svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="community"] {
     border-radius: 30% !important;
 }
 
-/* Avatares renderizados como <svg><image/></svg> (canales de difusion, comunidades, squircles como DiDi Food) */
-body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"] svg:has(image) {
-    position: static !important;
-    top: auto !important;
-    left: auto !important;
-    right: auto !important;
-    bottom: auto !important;
-    transform: none !important;
-    width: 49px !important;
-    min-width: 49px !important;
-    max-width: 49px !important;
-    height: 49px !important;
-    min-height: 49px !important;
-    max-height: 49px !important;
-    margin: 0 auto !important;
-    padding: 0 !important;
+/* Avatares renderizados como <svg><image/></svg> (canales, comunidades, aros de estado): respetar tamano y origen nativos */
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side [data-wa-avatar-col="true"] svg:has(image) {
+    max-width: 56px !important;
+    max-height: 56px !important;
     display: block !important;
     flex-shrink: 0 !important;
 }
 
-/* Iconos vectoriales de grupos/contactos sin foto: mantener su tamano nativo centrado sin forzar 49x49px en el <svg> */
-body.wa-sidebar-compact #pane-side [data-wa-avatar-col="true"]:not(:has(img)) svg:not(:has(image)),
-body.wa-sidebar-compact #pane-side span[data-icon="default-user"] svg,
-body.wa-sidebar-compact #pane-side span[data-icon="default-group"] svg,
-body.wa-sidebar-compact #pane-side span[data-icon*="avatar-"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
-body.wa-sidebar-compact #pane-side span[data-icon*="default-"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
-body.wa-sidebar-compact #pane-side span[data-icon*="channel"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
-body.wa-sidebar-compact #pane-side span[data-icon*="newsletter"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
-body.wa-sidebar-compact #pane-side span[data-icon*="broadcast"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
-body.wa-sidebar-compact #pane-side span[data-icon*="megaphone"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
-body.wa-sidebar-compact #pane-side span[data-icon*="announcement"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
-body.wa-sidebar-compact #pane-side span[data-icon="community-outline"] svg,
-body.wa-sidebar-compact #pane-side span[data-icon*="community"] svg {
+/* Iconos vectoriales legacy de grupos/contactos sin foto (sin tocar SVGs overlay de aros de estado o bordes squircle) */
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon="default-user"] svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon="default-group"] svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="avatar-"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="default-"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="channel"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="newsletter"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="broadcast"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="megaphone"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="announcement"]:not([data-icon*="verified"]):not([data-icon*="badge"]) svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon="community-outline"] svg,
+body.wa-sidebar-compact:not(.wa-tab-shell-active) #pane-side span[data-icon*="community"] svg {
     position: static !important;
     transform: none !important;
     max-width: 49px !important;
