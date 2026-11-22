@@ -45,6 +45,16 @@ body,
     --mention-at-text: var(--wa-dynamic-accent, #00a884) !important;
 }
 
+html[data-wa-accent-fg-override="true"],
+html[data-wa-accent-fg-override="true"] body,
+html[data-wa-accent-fg-override="true"] #app,
+html[data-wa-accent-fg-override="true"] #app > div {
+    --unread-marker-text: var(--wa-dynamic-accent-fg, #111b21) !important;
+    --WDS-content-on-accent: var(--wa-dynamic-accent-fg, #111b21) !important;
+    --WDS-systems-on-accent: var(--wa-dynamic-accent-fg, #111b21) !important;
+    --button-primary: var(--wa-dynamic-accent-fg, #111b21) !important;
+}
+
 body .wa-alt-badge,
 body [data-wa-accent-bg="true"] {
     background-color: var(--wa-dynamic-accent, #00a884) !important;
@@ -374,6 +384,17 @@ body.wa-tab-shell-active .three > div:has(#main):not([data-wa-tab-shell="true"])
     background-color: var(--panel-background-deep, var(--background-default, #111b21)) !important;
 }
 
+[data-wa-p10-grid="true"] {
+    box-sizing: border-box !important;
+    max-width: 100% !important;
+    justify-content: center !important;
+}
+
+[data-wa-p10-scaled="true"] {
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+}
+
 [data-wa-right-column="true"] {
     width: var(--wa-right-panel-width) !important;
     min-width: var(--wa-right-panel-width) !important;
@@ -502,7 +523,14 @@ html:not(.wa-resizing-active) body.wa-sidebar-animating [data-wa-flex-container=
 [data-wa-rail-seam-host="true"] > div:nth-child(2) {
     flex: 1 1 0% !important;
     min-width: 0 !important;
+}
+
+[data-wa-rail-seam-host="true"]:not([data-wa-drawer-middle-active="true"]) > div:nth-child(2) {
     pointer-events: none !important;
+}
+
+[data-wa-rail-seam-host="true"][data-wa-drawer-middle-active="true"] > div:nth-child(2) {
+    pointer-events: auto !important;
 }
 
 body.wa-sidebar-compact:not(.wa-tab-shell-active) [data-wa-rail-seam-host="true"] > div:first-child {

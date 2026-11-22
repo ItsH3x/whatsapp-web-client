@@ -177,13 +177,18 @@ void WhatsAppClient::initWebEngine() {
     });
     connect(m_page, &QWebEnginePage::loadFinished, this, &WhatsAppClient::onPageLoaded);
 
-    m_browser->installEventFilter(this);
-    if (m_browser->focusProxy()) {
-        m_browser->focusProxy()->installEventFilter(this);
-    }
+    auto ensureEventFilter = [this](QObject *obj) {
+        if (!obj || obj->property("_waEventFilterInstalled").toBool()) {
+            return;
+        }
+        obj->setProperty("_waEventFilterInstalled", true);
+        obj->installEventFilter(this);
+    };
+    ensureEventFilter(m_browser);
+    ensureEventFilter(m_browser->focusProxy());
     for (QObject *child : m_browser->children()) {
         if (child->isWidgetType()) {
-            child->installEventFilter(this);
+            ensureEventFilter(child);
         }
     }
 
@@ -300,13 +305,18 @@ void WhatsAppClient::showEvent(QShowEvent *event) {
         m_browser->page()->setLifecycleState(QWebEnginePage::LifecycleState::Active);
     }
     if (m_browser) {
-        m_browser->installEventFilter(this);
-        if (m_browser->focusProxy()) {
-            m_browser->focusProxy()->installEventFilter(this);
-        }
+        auto ensureEventFilter = [this](QObject *obj) {
+            if (!obj || obj->property("_waEventFilterInstalled").toBool()) {
+                return;
+            }
+            obj->setProperty("_waEventFilterInstalled", true);
+            obj->installEventFilter(this);
+        };
+        ensureEventFilter(m_browser);
+        ensureEventFilter(m_browser->focusProxy());
         for (QObject *child : m_browser->children()) {
             if (child->isWidgetType()) {
-                child->installEventFilter(this);
+                ensureEventFilter(child);
             }
         }
     }
@@ -392,16 +402,112 @@ static int consumeAltWheelStep(QWheelEvent *wheelEv, int &accumulatedDelta) {
 
     accumulatedDelta += delta;
     const int stepThreshold = hasAngleDelta ? 120 : 40;
+    int stepResult = 0;
 
     if (accumulatedDelta >= stepThreshold) {
         accumulatedDelta = 0;
-        return -1; // Rueda arriba -> Chat anterior
-    }
-    if (accumulatedDelta <= -stepThreshold) {
+        stepResult = -1; // Rueda arriba -> Chat anterior
+    } else if (accumulatedDelta <= -stepThreshold) {
         accumulatedDelta = 0;
-        return 1;  // Rueda abajo -> Chat siguiente
+        stepResult = 1;  // Rueda abajo -> Chat siguiente
     }
-    return 0;
+    return stepResult;
+}
+
+// Coalescing de rafagas de Alt + Rueda:
+// - Paso individual (en reposo): ejecuta navigateChatByOffset inmediatamente (0ms de retardo).
+// - Rafaga rapida (< 75ms entre muescas): acumula el desplazamiento neto y lo despacha en lote
+//   tras 45ms de pausa (o a los 85ms maximos para mantener feedback fluido sin encolar montajes
+//   intermedios de React en #main que sigan avanzando tras soltar la rueda).
+struct AltWheelCoalescer {
+    QTimer *timer = nullptr;
+    QElapsedTimer clock;
+    qint64 lastDispatchMs = -1000;
+    qint64 firstPendingMs = 0;
+    int pendingOffset = 0;
+    WhatsAppClient *owner = nullptr;
+};
+
+static AltWheelCoalescer &altWheelCoalescer() {
+    static AltWheelCoalescer state;
+    return state;
+}
+
+static void cancelAltWheelCoalescer() {
+    AltWheelCoalescer &st = altWheelCoalescer();
+    st.pendingOffset = 0;
+    st.firstPendingMs = 0;
+    if (st.timer && st.timer->isActive()) {
+        st.timer->stop();
+    }
+}
+
+static void dispatchAltWheelOffset(WhatsAppClient *client, int navOffset, const std::function<void(int)> &dispatchFn) {
+    if (!client || navOffset == 0) {
+        return;
+    }
+    AltWheelCoalescer &st = altWheelCoalescer();
+    if (!st.clock.isValid()) {
+        st.clock.start();
+    }
+    const qint64 nowMs = st.clock.elapsed();
+    constexpr qint64 kBurstWindowMs = 75;
+    constexpr int kCoalesceDelayMs = 45;
+    constexpr qint64 kMaxHoldMs = 85;
+
+    if (!st.timer || st.owner != client) {
+        if (st.timer) {
+            st.timer->stop();
+            st.timer->deleteLater();
+        }
+        st.owner = client;
+        st.timer = new QTimer(client);
+        st.timer->setSingleShot(true);
+        QObject::connect(st.timer, &QTimer::timeout, client, [dispatchFn]() {
+            AltWheelCoalescer &s = altWheelCoalescer();
+            const int offsetToSend = s.pendingOffset;
+            s.pendingOffset = 0;
+            s.firstPendingMs = 0;
+            if (offsetToSend != 0) {
+                s.lastDispatchMs = s.clock.elapsed();
+                dispatchFn(offsetToSend);
+            }
+        });
+    }
+
+    const bool inBurst = (nowMs - st.lastDispatchMs) < kBurstWindowMs || st.timer->isActive();
+    if (!inBurst && st.pendingOffset == 0) {
+        st.lastDispatchMs = nowMs;
+        dispatchFn(navOffset);
+        return;
+    }
+
+    if (st.pendingOffset == 0) {
+        st.firstPendingMs = nowMs;
+    }
+    st.pendingOffset += navOffset;
+
+    if (st.pendingOffset == 0) {
+        st.firstPendingMs = 0;
+        if (st.timer->isActive()) {
+            st.timer->stop();
+        }
+        return;
+    }
+
+    if ((nowMs - st.firstPendingMs) >= kMaxHoldMs) {
+        if (st.timer->isActive()) {
+            st.timer->stop();
+        }
+        const int offsetToSend = st.pendingOffset;
+        st.pendingOffset = 0;
+        st.firstPendingMs = 0;
+        st.lastDispatchMs = nowMs;
+        dispatchFn(offsetToSend);
+        return;
+    }
+
+    st.timer->start(kCoalesceDelayMs);
 }
 
 void WhatsAppClient::wheelEvent(QWheelEvent *event) {
@@ -412,6 +518,7 @@ void WhatsAppClient::wheelEvent(QWheelEvent *event) {
     if (m_altKeyDown && hasAltGr) {
         m_altKeyDown = false;
         m_wheelAccumulatedDelta = 0;
+        cancelAltWheelCoalescer();
         hideChatBadges();
     }
     bool altPressed = (m_altKeyDown || sysAlt) && !hasAltGr;
@@ -419,7 +526,7 @@ void WhatsAppClient::wheelEvent(QWheelEvent *event) {
     if (altPressed) {
         const int navOffset = consumeAltWheelStep(event, m_wheelAccumulatedDelta);
         if (navOffset != 0) {
-            navigateChatByOffset(navOffset);
+            dispatchAltWheelOffset(this, navOffset, [this](int off) { navigateChatByOffset(off); });
         }
         event->accept();
         return;
@@ -442,6 +549,7 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
         if (m_altKeyDown) {
             m_altKeyDown = false;
             m_wheelAccumulatedDelta = 0;
+            cancelAltWheelCoalescer();
             hideChatBadges();
         }
         return QMainWindow::eventFilter(obj, event);
@@ -452,6 +560,7 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
     // Solo la desactivacion real de la ventana/aplicacion oculta los badges.
     if ((etype == QEvent::WindowDeactivate && obj == this) || etype == QEvent::ApplicationDeactivate) {
         m_wheelAccumulatedDelta = 0;
+        cancelAltWheelCoalescer();
         if (m_altKeyDown) {
             m_altKeyDown = false;
             hideChatBadges();
@@ -462,6 +571,7 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
         if (!isPureLeftAltModifier(QApplication::keyboardModifiers())) {
             m_altKeyDown = false;
             m_wheelAccumulatedDelta = 0;
+            cancelAltWheelCoalescer();
             hideChatBadges();
         }
     }
@@ -482,6 +592,7 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
         if (m_altKeyDown && hasAltGr) {
             m_altKeyDown = false;
             m_wheelAccumulatedDelta = 0;
+            cancelAltWheelCoalescer();
             hideChatBadges();
         }
         bool altPressed = (m_altKeyDown || sysAlt) && !hasAltGr;
@@ -489,7 +600,7 @@ bool WhatsAppClient::eventFilter(QObject *obj, QEvent *event) {
         if (altPressed) {
             const int navOffset = consumeAltWheelStep(wheelEv, m_wheelAccumulatedDelta);
             if (navOffset != 0) {
-                navigateChatByOffset(navOffset);
+                dispatchAltWheelOffset(this, navOffset, [this](int off) { navigateChatByOffset(off); });
             }
             wheelEv->accept();
             return true;
@@ -621,13 +732,18 @@ void WhatsAppClient::onPageLoaded(bool ok) {
         m_wheelAccumulatedDelta = 0;
     }
     if (m_browser) {
-        m_browser->installEventFilter(this);
-        if (m_browser->focusProxy()) {
-            m_browser->focusProxy()->installEventFilter(this);
-        }
+        auto ensureEventFilter = [this](QObject *obj) {
+            if (!obj || obj->property("_waEventFilterInstalled").toBool()) {
+                return;
+            }
+            obj->setProperty("_waEventFilterInstalled", true);
+            obj->installEventFilter(this);
+        };
+        ensureEventFilter(m_browser);
+        ensureEventFilter(m_browser->focusProxy());
         for (QObject *child : m_browser->children()) {
             if (child->isWidgetType()) {
-                child->installEventFilter(this);
+                ensureEventFilter(child);
             }
         }
     }

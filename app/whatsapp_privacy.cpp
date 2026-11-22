@@ -1,8 +1,30 @@
 #include "whatsapp_window.h"
 
 #include <QApplication>
+#include <QColor>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QTimer>
+
+namespace {
+
+QColor parseCssColorString(const QString &raw) {
+    const QString s = raw.trimmed();
+    if (s.isEmpty()) {
+        return QColor();
+    }
+    if (s.startsWith(QLatin1Char('#'))) {
+        return QColor(s);
+    }
+    static const QRegularExpression rgbRe(QStringLiteral(R"(^rgba?\(\s*(\d{1,3})\s*[,\s]\s*(\d{1,3})\s*[,\s]\s*(\d{1,3}))"));
+    const QRegularExpressionMatch m = rgbRe.match(s);
+    if (m.hasMatch()) {
+        return QColor(m.captured(1).toInt(), m.captured(2).toInt(), m.captured(3).toInt());
+    }
+    return QColor();
+}
+
+} // namespace
 
 void WhatsAppClient::setupPrivacyShortcut() {
     m_quickPrivacyMode = false;
@@ -59,10 +81,43 @@ void WhatsAppClient::toggleQuickPrivacy() {
     }
 }
 
+void WhatsAppClient::syncLockOverlayAccent() {
+    if (!m_lockOverlay || !m_browser || !m_browser->page()) {
+        return;
+    }
+    const QString js = QStringLiteral(R"JS(
+        (function() {
+            var root = document.documentElement;
+            if (!root) return '';
+            var cs = window.getComputedStyle(root);
+            var accent = (window.__waAppliedDynamicAccent || cs.getPropertyValue('--wa-dynamic-accent') || '').trim();
+            var fg = (cs.getPropertyValue('--wa-dynamic-accent-fg') || '').trim();
+            return accent + '|' + fg;
+        })();
+    )JS");
+    m_browser->page()->runJavaScript(js, [this](const QVariant &res) {
+        if (!m_lockOverlay) {
+            return;
+        }
+        const QString packed = res.toString();
+        if (packed.isEmpty()) {
+            return;
+        }
+        const QStringList parts = packed.split(QLatin1Char('|'));
+        const QColor accent = parseCssColorString(parts.value(0));
+        const QColor fg = parseCssColorString(parts.value(1));
+        if (accent.isValid()) {
+            m_lockOverlay->setAccentColors(accent, fg);
+        }
+    });
+}
+
 void WhatsAppClient::lockApp() {
     show();
     activateWindow();
     m_quickPrivacyMode = false;
+    ensureLockOverlay();
+    syncLockOverlayAccent();
     if (m_lockOverlay) {
         m_lockOverlay->lock();
     }
@@ -72,6 +127,7 @@ void WhatsAppClient::lockApp() {
 }
 
 void WhatsAppClient::onAppLocked() {
+    syncLockOverlayAccent();
     applyNativeBlur(24);
 }
 

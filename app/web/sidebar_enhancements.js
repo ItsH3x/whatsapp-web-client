@@ -172,6 +172,49 @@
         return { s: s, l: l };
     }
 
+    function isAchromaticColor(rgba) {
+        if (!rgba || rgba.a < 0.5) return false;
+        var chroma = Math.max(rgba.r, rgba.g, rgba.b) - Math.min(rgba.r, rgba.g, rgba.b);
+        var hsl = rgbToHsl(rgba.r, rgba.g, rgba.b);
+        return chroma < 18 || hsl.s < 0.14;
+    }
+
+    function isUiDarkMode() {
+        var bgTargets = [
+            document.getElementById('pane-side'),
+            document.getElementById('side'),
+            document.querySelector('[data-wa-side-column="true"]'),
+            document.querySelector('#app > div'),
+            document.querySelector('#side header'),
+            document.querySelector('[data-wa-nav-rail="true"]')
+        ];
+        for (var i = 0; i < bgTargets.length; i++) {
+            var bgEl = bgTargets[i];
+            if (!bgEl) continue;
+            var bgCol = parseCssColor(window.getComputedStyle(bgEl).backgroundColor);
+            if (bgCol && bgCol.a > 0.5) {
+                var bgLum = (0.299 * bgCol.r + 0.587 * bgCol.g + 0.114 * bgCol.b) / 255;
+                return bgLum < 0.5;
+            }
+        }
+        return !!(document.body && document.body.classList.contains('dark'));
+    }
+
+    function isValidNeutralThemeColor(rgba, mainBg, incomingBg) {
+        if (!rgba || rgba.a < 0.85) return false;
+        var hsl = rgbToHsl(rgba.r, rgba.g, rgba.b);
+        if (hsl.l < 0.04 || hsl.l > 0.96) return false;
+        if (mainBg && mainBg.a >= 0.5) {
+            var diffMain = Math.abs(rgba.r - mainBg.r) + Math.abs(rgba.g - mainBg.g) + Math.abs(rgba.b - mainBg.b);
+            if (diffMain < 15) return false;
+        }
+        if (incomingBg && incomingBg.a >= 0.5) {
+            var diffIn = Math.abs(rgba.r - incomingBg.r) + Math.abs(rgba.g - incomingBg.g) + Math.abs(rgba.b - incomingBg.b);
+            if (diffIn < 15) return false;
+        }
+        return true;
+    }
+
     function isValidAccentColor(rgba) {
         if (!rgba || rgba.a < 0.5) return false;
         var chroma = Math.max(rgba.r, rgba.g, rgba.b) - Math.min(rgba.r, rgba.g, rgba.b);
@@ -214,6 +257,26 @@
 
     function normalizeAccent(rgba) {
         var hsl = rgbToHsl(rgba.r, rgba.g, rgba.b);
+        if (isAchromaticColor(rgba)) {
+            var neutralH = rgbToHue(rgba.r, rgba.g, rgba.b);
+            var neutralS = Math.min(hsl.s, 0.08);
+            var darkUi = isUiDarkMode();
+            var targetL = hsl.l;
+            if (darkUi) {
+                if (targetL < 0.50) {
+                    targetL = Math.max(0.54, Math.min(0.66, targetL + 0.30));
+                } else if (targetL > 0.86) {
+                    targetL = 0.86;
+                }
+            } else {
+                if (targetL > 0.48) {
+                    targetL = 0.40;
+                } else if (targetL < 0.18) {
+                    targetL = 0.22;
+                }
+            }
+            return hslToRgb(neutralH, neutralS, targetL);
+        }
         if (hsl.l >= 0.38) return { r: rgba.r, g: rgba.g, b: rgba.b, a: 1 };
         var h = rgbToHue(rgba.r, rgba.g, rgba.b);
         return hslToRgb(h, Math.max(hsl.s, 0.72), 0.46);
@@ -240,12 +303,24 @@
             var maxBubbleW = mainRect.width * 0.88;
 
             // 1. Priorizar burbujas reales de mensaje saliente (.message-out o [data-id^="true_"])
+            var mainCs = window.getComputedStyle(mainEl);
+            var mainBg = parseCssColor(mainCs.backgroundColor);
+            if ((!mainBg || mainBg.a < 0.5) && mainEl.firstElementChild) {
+                mainBg = parseCssColor(window.getComputedStyle(mainEl.firstElementChild).backgroundColor);
+            }
+            var incomingBg = parseCssColor((mainCs.getPropertyValue('--incoming-background') || '').trim());
             var outRoots = mainEl.querySelectorAll('[data-id^="true_"], .message-out');
             var colorCounts = {};
             var colorSamples = {};
             var colorDistinctNodes = {};
             var bestKey = null;
             var bestScore = 0;
+
+            var neutralCounts = {};
+            var neutralSamples = {};
+            var neutralDistinctNodes = {};
+            var bestNeutralKey = null;
+            var bestNeutralScore = 0;
 
             function recordCandidateColor(c, weight, elRef) {
                 var key = Math.round(c.r / 4) + ',' + Math.round(c.g / 4) + ',' + Math.round(c.b / 4);
@@ -261,6 +336,20 @@
                 }
             }
 
+            function recordNeutralColor(c, weight, elRef) {
+                var key = Math.round(c.r / 4) + ',' + Math.round(c.g / 4) + ',' + Math.round(c.b / 4);
+                neutralCounts[key] = (neutralCounts[key] || 0) + weight;
+                if (!neutralSamples[key]) neutralSamples[key] = c;
+                if (!neutralDistinctNodes[key]) neutralDistinctNodes[key] = [];
+                if (elRef && neutralDistinctNodes[key].indexOf(elRef) === -1) {
+                    neutralDistinctNodes[key].push(elRef);
+                }
+                if (neutralCounts[key] > bestNeutralScore) {
+                    bestNeutralScore = neutralCounts[key];
+                    bestNeutralKey = key;
+                }
+            }
+
             if (outRoots.length > 0) {
                 for (var or = outRoots.length - 1; or >= 0 && or >= outRoots.length - 12; or--) {
                     var rootEl = outRoots[or];
@@ -273,18 +362,26 @@
                         if (sr.width < 32 || sr.width > maxBubbleW || sr.height < 18 || sr.height > 360) continue;
                         cs = window.getComputedStyle(sub);
                         col = parseCssColor(cs.backgroundColor);
+                        var areaWeight = Math.min(4, Math.max(1, Math.round((sr.width * sr.height) / 1500)));
                         if (isValidAccentColor(col)) {
-                            recordCandidateColor(col, Math.min(4, Math.max(1, Math.round((sr.width * sr.height) / 1500))), rootEl);
+                            recordCandidateColor(col, areaWeight, rootEl);
+                        } else if (isValidNeutralThemeColor(col, mainBg, incomingBg)) {
+                            recordNeutralColor(col, areaWeight, rootEl);
                         } else if (sr.width >= 140 && Math.abs(sr.width - sr.height) <= 24) {
                             col = parseCssColor(cs.borderTopColor);
                             if (isValidAccentColor(col)) {
                                 recordCandidateColor(col, 3, rootEl);
+                            } else if (isValidNeutralThemeColor(col, mainBg, incomingBg)) {
+                                recordNeutralColor(col, 3, rootEl);
                             }
                         }
                     }
                 }
-                if (bestKey && colorSamples[bestKey]) {
+                if (bestKey && colorSamples[bestKey] && (!bestNeutralKey || bestScore >= bestNeutralScore * 0.5)) {
                     return saveMainThemeAccent(colorSamples[bestKey]);
+                }
+                if (bestNeutralKey && neutralSamples[bestNeutralKey]) {
+                    return saveMainThemeAccent(neutralSamples[bestNeutralKey]);
                 }
             }
 
@@ -302,18 +399,31 @@
                 cs = window.getComputedStyle(el);
                 col = parseCssColor(cs.backgroundColor);
                 var bubbleGroup = el.closest('[role="row"], [data-id]') || el;
+                var stepWeight = Math.min(3, Math.max(1, Math.round((r.width * r.height) / 1800)));
+                var leftDist = r.left - mainRect.left;
+                var rightDist = mainRect.right - r.right;
+                var isRightAnchoredBubble = (leftDist > rightDist + 20 && rightDist >= 16 && rightDist <= 140);
                 if (isValidAccentColor(col)) {
-                    recordCandidateColor(col, Math.min(3, Math.max(1, Math.round((r.width * r.height) / 1800))), bubbleGroup);
+                    recordCandidateColor(col, stepWeight, bubbleGroup);
+                } else if (isRightAnchoredBubble && isValidNeutralThemeColor(col, mainBg, incomingBg)) {
+                    recordNeutralColor(col, stepWeight, bubbleGroup);
                 } else if (r.width >= 140 && Math.abs(r.width - r.height) <= 24) {
                     col = parseCssColor(cs.borderTopColor);
                     if (isValidAccentColor(col)) {
                         recordCandidateColor(col, 2, bubbleGroup);
+                    } else if (isRightAnchoredBubble && isValidNeutralThemeColor(col, mainBg, incomingBg)) {
+                        recordNeutralColor(col, 2, bubbleGroup);
                     }
                 }
             }
             var distinctCount = (bestKey && colorDistinctNodes[bestKey]) ? colorDistinctNodes[bestKey].length : 0;
-            if (bestKey && bestScore >= 3 && distinctCount >= 2 && colorSamples[bestKey]) {
+            var neutralDistinctCount = (bestNeutralKey && neutralDistinctNodes[bestNeutralKey]) ? neutralDistinctNodes[bestNeutralKey].length : 0;
+            if (bestKey && bestScore >= 3 && distinctCount >= 2 && colorSamples[bestKey] &&
+                (!bestNeutralKey || bestScore >= bestNeutralScore * 0.5)) {
                 return saveMainThemeAccent(colorSamples[bestKey]);
+            }
+            if (bestNeutralKey && bestNeutralScore >= 3 && neutralDistinctCount >= 1 && neutralSamples[bestNeutralKey]) {
+                return saveMainThemeAccent(neutralSamples[bestNeutralKey]);
             }
         }
 
@@ -364,102 +474,108 @@
         return null;
     }
 
-    function computeAccentFg(rgba) {
+    function relativeLuminance(rgba) {
         function toLin(c) {
             var v = c / 255;
             return v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4);
         }
-        var lum = 0.2126 * toLin(rgba.r) + 0.7152 * toLin(rgba.g) + 0.0722 * toLin(rgba.b);
-        return lum > 0.45 ? '#111b21' : '#ffffff';
+        return 0.2126 * toLin(rgba.r) + 0.7152 * toLin(rgba.g) + 0.0722 * toLin(rgba.b);
+    }
+
+    function contrastRatio(c1, c2) {
+        var l1 = relativeLuminance(c1);
+        var l2 = relativeLuminance(c2);
+        var hi = Math.max(l1, l2);
+        var lo = Math.min(l1, l2);
+        return (hi + 0.05) / (lo + 0.05);
+    }
+
+    function ensureLegibleAccentFg(accentCol, nativeFgStr) {
+        var darkFg = { r: 17, g: 27, b: 33, a: 1 };
+        var lightFg = { r: 255, g: 255, b: 255, a: 1 };
+        var nativeParsed = parseCssColor(nativeFgStr) || (isUiDarkMode() ? darkFg : lightFg);
+        var nativeCr = contrastRatio(accentCol, nativeParsed);
+        var darkCr = contrastRatio(accentCol, darkFg);
+        var lightCr = contrastRatio(accentCol, lightFg);
+        var bestFgStr = darkCr >= lightCr ? '#111b21' : '#ffffff';
+        var bestCr = Math.max(darkCr, lightCr);
+        var minRequiredCr = isAchromaticColor(accentCol) ? 4.5 : 2.6;
+        if (nativeCr < minRequiredCr && bestCr > nativeCr + 0.5) {
+            return { fg: bestFgStr, overridden: true };
+        }
+        return { fg: nativeFgStr, overridden: false };
     }
 
     function resolveNativeBadgeFg() {
-        var scopes = [
-            document.querySelector('[data-wa-nav-rail="true"]') || document.querySelector('#app > div > header') || document.querySelector('#app header'),
-            document.getElementById('pane-side') || document.getElementById('side')
-        ];
-        var badgeSelector = 'span[aria-label*="no le" i], span[aria-label*="unread" i], [aria-label*="no le" i] span, [aria-label*="unread" i] span';
-        for (var s = 0; s < scopes.length; s++) {
-            var root = scopes[s];
-            if (!root) continue;
-            var badges = root.querySelectorAll(badgeSelector);
-            for (var i = 0; i < badges.length; i++) {
-                var b = badges[i];
-                if (!b || (b.classList && b.classList.contains('wa-alt-badge'))) continue;
-                var leaf = b;
-                if (leaf.children.length > 0) {
-                    var innerSpans = b.querySelectorAll('span, div');
-                    for (var j = 0; j < innerSpans.length; j++) {
-                        var sp = innerSpans[j];
-                        if (sp.children.length === 0 && /^\d+\+?$/.test((sp.textContent || '').trim())) {
-                            leaf = sp;
-                            break;
+        var fgOverrideActive = document.documentElement && document.documentElement.getAttribute('data-wa-accent-fg-override') === 'true';
+        if (!fgOverrideActive) {
+            var scopes = [
+                document.querySelector('[data-wa-nav-rail="true"]') || document.querySelector('#app > div > header') || document.querySelector('#app header'),
+                document.getElementById('pane-side') || document.getElementById('side')
+            ];
+            var badgeSelector = 'span[aria-label*="no le" i], span[aria-label*="unread" i], [aria-label*="no le" i] span, [aria-label*="unread" i] span';
+            for (var s = 0; s < scopes.length; s++) {
+                var root = scopes[s];
+                if (!root) continue;
+                var badges = root.querySelectorAll(badgeSelector);
+                for (var i = 0; i < badges.length; i++) {
+                    var b = badges[i];
+                    if (!b || (b.classList && b.classList.contains('wa-alt-badge'))) continue;
+                    var leaf = b;
+                    if (leaf.children.length > 0) {
+                        var innerSpans = b.querySelectorAll('span, div');
+                        for (var j = 0; j < innerSpans.length; j++) {
+                            var sp = innerSpans[j];
+                            if (sp.children.length === 0 && /^\d+\+?$/.test((sp.textContent || '').trim())) {
+                                leaf = sp;
+                                break;
+                            }
                         }
                     }
-                }
-                if (leaf.children.length !== 0 || !/^\d+\+?$/.test((leaf.textContent || '').trim())) continue;
-                var br = leaf.getBoundingClientRect();
-                if (br.width <= 0 || br.height <= 0 || br.width > 96 || br.height > 40) continue;
+                    if (leaf.children.length !== 0 || !/^\d+\+?$/.test((leaf.textContent || '').trim())) continue;
+                    var br = leaf.getBoundingClientRect();
+                    if (br.width <= 0 || br.height <= 0 || br.width > 96 || br.height > 40) continue;
 
-                // Exigir un fondo cromatico real en la pildora (descarta contadores grises de chats silenciados)
-                var hasChromaticPillBg = false;
-                var pillNode = leaf;
-                for (var depth = 0; depth < 3 && pillNode && pillNode !== root; depth++) {
-                    var pr = pillNode.getBoundingClientRect();
-                    if (pr.width > 96 || pr.height > 40) break;
-                    var pBg = parseCssColor(window.getComputedStyle(pillNode).backgroundColor);
-                    if (pBg && pBg.a > 0.5) {
-                        hasChromaticPillBg = isValidAccentColor(pBg);
-                        break;
+                    // Exigir un fondo cromatico real en la pildora (descarta contadores grises de chats silenciados)
+                    var hasChromaticPillBg = false;
+                    var pillNode = leaf;
+                    for (var depth = 0; depth < 3 && pillNode && pillNode !== root; depth++) {
+                        var pr = pillNode.getBoundingClientRect();
+                        if (pr.width > 96 || pr.height > 40) break;
+                        var pBg = parseCssColor(window.getComputedStyle(pillNode).backgroundColor);
+                        if (pBg && pBg.a > 0.5) {
+                            hasChromaticPillBg = isValidAccentColor(pBg);
+                            break;
+                        }
+                        pillNode = pillNode.parentElement;
                     }
-                    pillNode = pillNode.parentElement;
-                }
-                if (!hasChromaticPillBg) continue;
+                    if (!hasChromaticPillBg) continue;
 
-                var cs = window.getComputedStyle(leaf);
-                var col = parseCssColor(cs.color);
-                if (col && col.a > 0.5) {
-                    return 'rgb(' + col.r + ', ' + col.g + ', ' + col.b + ')';
+                    var cs = window.getComputedStyle(leaf);
+                    var col = parseCssColor(cs.color);
+                    if (col && col.a > 0.5) {
+                        return 'rgb(' + col.r + ', ' + col.g + ', ' + col.b + ')';
+                    }
+                }
+            }
+            var varTargets = [
+                document.getElementById('pane-side'),
+                document.getElementById('side'),
+                document.querySelector('#app > div')
+            ];
+            for (var vt = 0; vt < varTargets.length; vt++) {
+                var t = varTargets[vt];
+                if (!t) continue;
+                var raw = (window.getComputedStyle(t).getPropertyValue('--unread-marker-text') || '').trim();
+                if (raw) {
+                    var parsed = parseCssColor(raw);
+                    if (parsed && parsed.a > 0.5) {
+                        return 'rgb(' + parsed.r + ', ' + parsed.g + ', ' + parsed.b + ')';
+                    }
                 }
             }
         }
-        var varTargets = [
-            document.getElementById('pane-side'),
-            document.getElementById('side'),
-            document.querySelector('#app > div')
-        ];
-        for (var vt = 0; vt < varTargets.length; vt++) {
-            var t = varTargets[vt];
-            if (!t) continue;
-            var raw = (window.getComputedStyle(t).getPropertyValue('--unread-marker-text') || '').trim();
-            if (raw) {
-                var parsed = parseCssColor(raw);
-                if (parsed && parsed.a > 0.5) {
-                    return 'rgb(' + parsed.r + ', ' + parsed.g + ', ' + parsed.b + ')';
-                }
-            }
-        }
-        var bgTargets = [
-            document.getElementById('pane-side'),
-            document.getElementById('side'),
-            document.querySelector('[data-wa-side-column="true"]'),
-            document.querySelector('#app > div'),
-            document.querySelector('#side header'),
-            document.querySelector('[data-wa-nav-rail="true"]')
-        ];
-        for (var bt = 0; bt < bgTargets.length; bt++) {
-            var bgEl = bgTargets[bt];
-            if (!bgEl) continue;
-            var bgCol = parseCssColor(window.getComputedStyle(bgEl).backgroundColor);
-            if (bgCol && bgCol.a > 0.5) {
-                var bgLum = (0.299 * bgCol.r + 0.587 * bgCol.g + 0.114 * bgCol.b) / 255;
-                return bgLum < 0.5 ? '#111b21' : '#ffffff';
-            }
-        }
-        if (document.body && document.body.classList.contains('dark')) {
-            return '#111b21';
-        }
-        return '#ffffff';
+        return isUiDarkMode() ? '#111b21' : '#ffffff';
     }
 
     function ensureAccentProbe() {
@@ -628,10 +744,18 @@
     function deriveAccentPalette(col) {
         var hsl = rgbToHsl(col.r, col.g, col.b);
         var h = rgbToHue(col.r, col.g, col.b);
-        var s = Math.max(0.45, Math.min(0.85, hsl.s || 0.65));
-        var lightRgb = hslToRgb(h, Math.min(0.90, s * 1.05), 0.88);
-        var darkRgb = hslToRgb(h, Math.min(0.75, s * 0.90), 0.17);
-        var borderRgb = hslToRgb(h, Math.min(0.80, s), 0.32);
+        var lightRgb, darkRgb, borderRgb;
+        if (isAchromaticColor(col)) {
+            var ns = Math.min(hsl.s, 0.08);
+            lightRgb = hslToRgb(h, ns, 0.88);
+            darkRgb = hslToRgb(h, ns, 0.18);
+            borderRgb = hslToRgb(h, ns, 0.36);
+        } else {
+            var s = Math.max(0.45, Math.min(0.85, hsl.s || 0.65));
+            lightRgb = hslToRgb(h, Math.min(0.90, s * 1.05), 0.88);
+            darkRgb = hslToRgb(h, Math.min(0.75, s * 0.90), 0.17);
+            borderRgb = hslToRgb(h, Math.min(0.80, s), 0.32);
+        }
         return {
             light: 'rgb(' + lightRgb.r + ', ' + lightRgb.g + ', ' + lightRgb.b + ')',
             lightRgbStr: lightRgb.r + ', ' + lightRgb.g + ', ' + lightRgb.b,
@@ -645,8 +769,13 @@
     var discoveredWdsVarRuleText = '';
     var wdsCandidateVarNames = null;
 
+    var wdsCandidateSheetCount = -1;
+
     function collectWdsCandidateVarNames() {
-        if (wdsCandidateVarNames && wdsCandidateVarNames.length > 50) return wdsCandidateVarNames;
+        var sheetCount = document.styleSheets ? document.styleSheets.length : 0;
+        if (wdsCandidateVarNames && wdsCandidateVarNames.length > 50 && sheetCount === wdsCandidateSheetCount) {
+            return wdsCandidateVarNames;
+        }
         var seen = {};
         var names = [
             '--WDS-accent', '--WDS-accent-RGB', '--WDS-systems-accent', '--WDS-systems-accent-RGB',
@@ -657,7 +786,7 @@
             '--teal', '--teal-rgb', '--teal-light', '--teal-light-rgb',
             '--ptt-green', '--ptt-green-rgb', '--highlight', '--highlight-rgb',
             '--mention-at-text', '--incoming-background-highlight', '--outgoing-background-highlight',
-            '--checkbox-background', '--progress-primary', '--spinner-highlight', '-- typing', '--typing-rgb'
+            '--checkbox-background', '--progress-primary', '--spinner-highlight', '--typing', '--typing-rgb'
         ];
         for (var n = 0; n < names.length; n++) {
             seen[names[n]] = true;
@@ -675,10 +804,26 @@
                 for (var r = 0; r < rules.length; r++) {
                     var rule = rules[r];
                     var st = rule && rule.style;
-                    if (!st) continue;
+                    if (!st || !st.length) continue;
                     var sel = rule.selectorText || '';
-                    if (sel.indexOf(':root') === -1 && sel.indexOf('body') === -1 && sel.indexOf('dark') === -1 && sel.indexOf('theme') === -1 && sel.indexOf('#app') === -1) {
-                        continue;
+                    var isThemeSelector = (
+                        sel.indexOf(':root') !== -1 ||
+                        sel.indexOf('body') !== -1 ||
+                        sel.indexOf('dark') !== -1 ||
+                        sel.indexOf('theme') !== -1 ||
+                        sel.indexOf('#app') !== -1
+                    );
+                    if (!isThemeSelector) {
+                        if (st.length < 5) continue;
+                        var customPropCount = 0;
+                        for (var c = 0; c < st.length; c++) {
+                            var cp = st[c];
+                            if (cp && cp.indexOf('--') === 0 && cp.indexOf('--wa-') !== 0) {
+                                customPropCount++;
+                                if (customPropCount >= 5) break;
+                            }
+                        }
+                        if (customPropCount < 5) continue;
                     }
                     for (var p = 0; p < st.length; p++) {
                         var prop = st[p];
@@ -693,6 +838,7 @@
             // Ignorar hojas inaccesibles
         }
         wdsCandidateVarNames = names;
+        wdsCandidateSheetCount = sheetCount;
         return names;
     }
 
@@ -702,7 +848,8 @@
             styleEl.disabled = true;
         }
         var varNames = collectWdsCandidateVarNames();
-        var targets = [document.documentElement, document.body, document.querySelector('#app > div')];
+        var probeTarget = document.getElementById('side') || document.querySelector('#app > div') || document.body || document.documentElement;
+        var targets = probeTarget ? [probeTarget] : [];
         var declarations = [];
         var mapped = {};
 
@@ -866,30 +1013,84 @@
         }
     }
 
+    var lastAccentContextSig = '';
+    var lastWdsThemeSig = '';
+
+    function getThemeStateSignature() {
+        var html = document.documentElement;
+        var body = document.body;
+        var appRoot = document.querySelector('#app > div');
+        var htmlDark = html ? ((html.getAttribute('data-theme') || '') + '|' + (html.classList.contains('dark') ? '1' : '0')) : '';
+        var bodyDark = body ? ((body.getAttribute('data-theme') || '') + '|' + (body.classList.contains('dark') ? '1' : '0')) : '';
+        var appCls = appRoot ? (appRoot.className || '') : '';
+        return htmlDark + '||' + bodyDark + '||' + appCls;
+    }
+
+    function getActiveChatSignature() {
+        var mainEl = document.getElementById('main');
+        if (!mainEl) return 'no-main';
+        var titleEl = mainEl.querySelector('header span[title], header [dir="auto"]');
+        var titleTxt = titleEl ? (titleEl.getAttribute('title') || titleEl.textContent || '').trim().slice(0, 80) : '';
+        var firstChild = mainEl.firstElementChild;
+        var mainCls = (mainEl.className || '') + '|' + (firstChild ? (firstChild.className || '') : '');
+        var mainInline = (mainEl.getAttribute('style') || '') + '|' + (firstChild ? (firstChild.getAttribute('style') || '') : '');
+        var msgOut = mainEl.querySelector('.message-out, [data-id^="true_"]');
+        var msgOutSig = msgOut ? ('1:' + (msgOut.className || '')) : '0';
+        return titleTxt + '||' + mainCls + '||' + mainInline + '||' + msgOutSig;
+    }
+
     function tagWhatsAppGreenAccents() {
+        if (discoveredWdsVarRuleText) return;
         if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
         var roots = [
             document.querySelector('[data-wa-nav-rail="true"]') || document.querySelector('#app header'),
-            document.getElementById('side') || document.querySelector('[data-wa-side-column="true"]'),
-            document.querySelector('[data-wa-tab-side-column="true"]'),
-            document.querySelector('[data-wa-left-drawer="true"]')
+            document.getElementById('side') || document.querySelector('[data-wa-side-column="true"]')
         ];
         for (var r = 0; r < roots.length; r++) {
             if (roots[r]) {
-                tagWhatsAppGreenSubtree(roots[r], 2800);
+                tagWhatsAppGreenSubtree(roots[r], 400);
             }
         }
     }
 
-    function syncThemePalette(forceWhenAlt) {
+    function syncThemePalette(forceWhenAlt, forceProbe) {
         if (!forceWhenAlt && window.__waAltKeyDown === true) return;
         if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+
+        var themeSig = getThemeStateSignature();
+        var themeChanged = (themeSig !== lastWdsThemeSig);
+        var existingWdsStyle = document.getElementById('wa-dynamic-wds-overrides');
+        if (!themeChanged && !discoveredWdsVarRuleText && existingWdsStyle && existingWdsStyle.textContent) {
+            discoveredWdsVarRuleText = existingWdsStyle.textContent;
+        }
+        if (themeChanged || (!discoveredWdsVarRuleText && document.querySelector('#app > div'))) {
+            if (themeChanged) {
+                discoveredWdsVarRuleText = '';
+                lastWdsThemeSig = themeSig;
+            }
+            if (document.querySelector('#app > div')) {
+                syncDynamicWdsCssVars();
+            }
+        }
+
+        var ctxSig = themeSig + '###' + getActiveChatSignature();
+        if (!forceProbe && !themeChanged && lastAppliedAccent && ctxSig === lastAccentContextSig) {
+            return;
+        }
+        lastAccentContextSig = ctxSig;
+
         var col = normalizeAccent(detectDynamicAccent());
         var cssAccent = 'rgb(' + col.r + ', ' + col.g + ', ' + col.b + ')';
         var cssAccentRgb = col.r + ', ' + col.g + ', ' + col.b;
         var cssTint = 'rgba(' + col.r + ', ' + col.g + ', ' + col.b + ', 0.22)';
         var palette = deriveAccentPalette(col);
-        var cssFg = resolveNativeBadgeFg();
+        var fgCheck = ensureLegibleAccentFg(col, resolveNativeBadgeFg());
+        var cssFg = fgCheck.fg;
+        if (fgCheck.overridden) {
+            document.documentElement.setAttribute('data-wa-accent-fg-override', 'true');
+        } else {
+            document.documentElement.removeAttribute('data-wa-accent-fg-override');
+        }
         if (cssAccent !== lastAppliedAccent) {
             lastAppliedAccent = cssAccent;
             window.__waAppliedDynamicAccent = cssAccent;
@@ -907,19 +1108,20 @@
             lastAppliedAccentFg = cssFg;
             document.documentElement.style.setProperty('--wa-dynamic-accent-fg', cssFg);
         }
-        if (!discoveredWdsVarRuleText && document.querySelector('#app > div')) {
-            syncDynamicWdsCssVars();
-        }
     }
 
     function syncDynamicAccent() {
-        syncThemePalette(false);
-        tagWhatsAppGreenAccents();
+        syncThemePalette(false, true);
+        if (!discoveredWdsVarRuleText) {
+            tagWhatsAppGreenAccents();
+        }
     }
 
     window.__waDetectAndApplyAccent = function() {
-        syncThemePalette(false);
-        tagWhatsAppGreenAccents();
+        syncThemePalette(false, true);
+        if (!discoveredWdsVarRuleText) {
+            tagWhatsAppGreenAccents();
+        }
         return {
             accent: lastAppliedAccent,
             fg: lastAppliedAccentFg
@@ -931,27 +1133,21 @@
     function scheduleAccentSync(immediate) {
         if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
         if (immediate) {
-            if (accentSyncTimer) {
-                clearTimeout(accentSyncTimer);
-                accentSyncTimer = null;
+            if (paletteSyncTimer) {
+                clearTimeout(paletteSyncTimer);
+                paletteSyncTimer = null;
             }
-            syncThemePalette(false);
-            tagWhatsAppGreenAccents();
+            syncThemePalette(false, true);
             return;
         }
         if (!paletteSyncTimer && window.__waAltKeyDown !== true) {
             paletteSyncTimer = setTimeout(function() {
                 paletteSyncTimer = null;
                 if (window.__waAltKeyDown !== true) {
-                    syncThemePalette(false);
+                    syncThemePalette(false, false);
                 }
-            }, 350);
+            }, 300);
         }
-        if (accentSyncTimer) return;
-        accentSyncTimer = setTimeout(function() {
-            accentSyncTimer = null;
-            tagWhatsAppGreenAccents();
-        }, 220);
     }
 
     function isElementVisible(el) {
@@ -1043,6 +1239,19 @@
         return cs.display !== 'none' && cs.visibility !== 'hidden';
     }
 
+    function parseTransformOriginX(cs, boxW) {
+        if (!cs || !cs.transformOrigin) return boxW / 2;
+        var parts = cs.transformOrigin.trim().split(/\s+/);
+        if (!parts.length) return boxW / 2;
+        var token = parts[0];
+        var val = parseFloat(token);
+        if (!isFinite(val)) return boxW / 2;
+        if (token.indexOf('%') !== -1) {
+            return (val / 100) * boxW;
+        }
+        return val;
+    }
+
     function computeUnscaledHorizontalBounds(host, rect, prevDx) {
         var boxW = host.offsetWidth || Math.round(rect.width);
         if (boxW <= 0) return null;
@@ -1056,26 +1265,30 @@
             if (typeof window.DOMMatrixReadOnly === 'function') {
                 try {
                     var dm = new window.DOMMatrixReadOnly(tr);
-                    scaleX = dm.a || dm.m11 || 1;
-                    tx = dm.m41 || 0;
+                    scaleX = isFinite(dm.a) ? dm.a : (isFinite(dm.m11) ? dm.m11 : 1);
+                    tx = isFinite(dm.m41) ? dm.m41 : 0;
                     hasMatrix = true;
                 } catch (err) {
                     hasMatrix = false;
                 }
             }
             if (!hasMatrix) {
-                var m2d = tr.match(/matrix\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)\s*,\s*([-\d.]+)/);
+                var m2d = tr.match(/matrix\(\s*([-\d.eE+]+)\s*,\s*([-\d.eE+]+)\s*,\s*([-\d.eE+]+)\s*,\s*([-\d.eE+]+)\s*,\s*([-\d.eE+]+)\s*,\s*([-\d.eE+]+)/);
                 if (m2d) {
-                    scaleX = parseFloat(m2d[1]) || 1;
-                    tx = parseFloat(m2d[5]) || 0;
+                    var parsed2dScale = parseFloat(m2d[1]);
+                    var parsed2dTx = parseFloat(m2d[5]);
+                    scaleX = isFinite(parsed2dScale) ? parsed2dScale : 1;
+                    tx = isFinite(parsed2dTx) ? parsed2dTx : 0;
                     hasMatrix = true;
                 } else {
                     var m3d = tr.match(/matrix3d\(([^)]+)\)/);
                     if (m3d) {
                         var parts = m3d[1].split(',');
                         if (parts.length >= 16) {
-                            scaleX = parseFloat(parts[0]) || 1;
-                            tx = parseFloat(parts[12]) || 0;
+                            var parsed3dScale = parseFloat(parts[0]);
+                            var parsed3dTx = parseFloat(parts[12]);
+                            scaleX = isFinite(parsed3dScale) ? parsed3dScale : 1;
+                            tx = isFinite(parsed3dTx) ? parsed3dTx : 0;
                             hasMatrix = true;
                         }
                     }
@@ -1083,12 +1296,28 @@
             }
         }
 
+        if (cs.scale && cs.scale !== 'none') {
+            var scaleParts = cs.scale.trim().split(/\s+/);
+            var cssScaleX = parseFloat(scaleParts[0]);
+            if (isFinite(cssScaleX)) {
+                scaleX *= cssScaleX;
+            }
+        }
+
         var unscaledLeft;
-        if ((cs.position === 'fixed' || cs.position === 'absolute') && hasMatrix && Math.abs(scaleX - 1) <= 0.01 && host.offsetParent === document.body) {
+        var isScaled = Math.abs(scaleX - 1) > 1e-4;
+        if ((cs.position === 'fixed' || cs.position === 'absolute') && hasMatrix && !isScaled && host.offsetParent === document.body) {
             unscaledLeft = (host.offsetLeft || 0) + tx;
-        } else if (Math.abs(scaleX - 1) > 0.01 && rect.width > 0) {
-            var center = (rect.left - prevDx) + rect.width / 2;
-            unscaledLeft = center - boxW / 2;
+        } else if (isScaled) {
+            if (scaleX >= 0) {
+                var originX = parseTransformOriginX(cs, boxW);
+                unscaledLeft = (rect.left - prevDx) - originX * (1 - scaleX);
+            } else if (rect.width > 0) {
+                var center = (rect.left - prevDx) + rect.width / 2;
+                unscaledLeft = center - boxW / 2;
+            } else {
+                unscaledLeft = rect.left - prevDx;
+            }
         } else {
             unscaledLeft = rect.left - prevDx;
         }
@@ -1096,87 +1325,145 @@
         return {
             naturalLeft: unscaledLeft,
             naturalRight: unscaledLeft + boxW,
-            width: boxW
+            width: boxW,
+            scaleX: scaleX,
+            transitionProperty: cs.transitionProperty || ''
         };
     }
 
+    function isFloatingPickerHost(host) {
+        if (!host || host.nodeType !== 1 || !host.isConnected) return false;
+        return host.matches('[data-animate-picker], [data-animate-modal-popup], [role="dialog"], [role="menu"], [role="listbox"]') ||
+            !!host.querySelector('[role="tablist"], [data-animate-picker], input[type="search"], input[placeholder]');
+    }
+
+    function isFloatingHostEligible(host, mainRect) {
+        if (!host || !host.isConnected) return false;
+        var hRect = host.getBoundingClientRect();
+        var hW = host.offsetWidth || hRect.width;
+        var hH = host.offsetHeight || hRect.height;
+        if (hW < 160 || hH < 110) return false;
+        if (mainRect && hH >= mainRect.height * 0.82 && hW >= mainRect.width * 0.88) return false;
+        return isFloatingPickerHost(host);
+    }
+
     function clampFloatingPickerViewport(host) {
-        if (!host || !host.isConnected) return;
-        var rect = host.getBoundingClientRect();
-        var offW = host.offsetWidth || Math.round(rect.width);
-        var offH = host.offsetHeight || Math.round(rect.height);
-        if (offW <= 0 || offH <= 0) return;
+        if (!host || !host.isConnected || host.__waPickerClamping) return;
+        host.__waPickerClamping = true;
+        try {
+            var rect = host.getBoundingClientRect();
+            var offW = host.offsetWidth || Math.round(rect.width);
+            var offH = host.offsetHeight || Math.round(rect.height);
+            if (offW <= 0 || offH <= 0) return;
 
-        var vw = window.innerWidth;
-        var margin = 10;
-        var maxAllowedW = vw - 16;
-        var prevDx = parseFloat(host.getAttribute('data-wa-picker-dx') || '0') || 0;
+            var vw = window.innerWidth;
+            var margin = 10;
+            var maxAllowedW = vw - 16;
+            var isClamped = host.getAttribute('data-wa-picker-clamped') === 'true';
+            var hasInlineTranslate = !!host.style.getPropertyValue('translate');
+            var prevDx = (isClamped && !hasInlineTranslate)
+                ? 0
+                : (parseFloat(host.getAttribute('data-wa-picker-dx') || '0') || 0);
 
-        if (offW > maxAllowedW || rect.width > maxAllowedW) {
-            host.style.setProperty('max-width', 'calc(100vw - 16px)', 'important');
-            host.style.setProperty('box-sizing', 'border-box', 'important');
-            host.style.setProperty('overflow-x', 'clip', 'important');
-            var innerWide = host.querySelectorAll(':scope > div, :scope > span, [data-animate-picker]');
-            for (var iw = 0; iw < innerWide.length; iw++) {
-                innerWide[iw].style.setProperty('max-width', '100%', 'important');
-                innerWide[iw].style.setProperty('box-sizing', 'border-box', 'important');
+            if (offW > maxAllowedW || rect.width > maxAllowedW) {
+                host.style.setProperty('max-width', 'calc(100vw - 16px)', 'important');
+                host.style.setProperty('box-sizing', 'border-box', 'important');
+                host.style.setProperty('overflow-x', 'clip', 'important');
+                var innerWide = host.querySelectorAll(':scope > div, :scope > span, [data-animate-picker]');
+                for (var iw = 0; iw < innerWide.length; iw++) {
+                    innerWide[iw].style.setProperty('max-width', '100%', 'important');
+                    innerWide[iw].style.setProperty('box-sizing', 'border-box', 'important');
+                }
+                rect = host.getBoundingClientRect();
+                offW = host.offsetWidth || Math.round(rect.width);
             }
-            rect = host.getBoundingClientRect();
-            offW = host.offsetWidth || Math.round(rect.width);
-        }
 
-        var bounds = computeUnscaledHorizontalBounds(host, rect, prevDx);
-        if (!bounds) return;
+            var bounds = computeUnscaledHorizontalBounds(host, rect, prevDx);
+            if (!bounds) return;
 
-        var naturalLeft = bounds.naturalLeft;
-        var naturalRight = bounds.naturalRight;
-        var targetDx = 0;
+            var naturalLeft = bounds.naturalLeft;
+            var naturalRight = bounds.naturalRight;
+            var targetDx = 0;
 
-        if (naturalLeft < 8) {
-            targetDx = Math.round(margin - naturalLeft);
-        } else if (naturalRight > vw - 8) {
-            targetDx = Math.round((vw - margin) - naturalRight);
-        }
+            if (naturalLeft < 8) {
+                targetDx = Math.round(margin - naturalLeft);
+            } else if (naturalRight > vw - 8) {
+                targetDx = Math.round((vw - margin) - naturalRight);
+            }
 
-        if (Math.abs(targetDx - prevDx) <= 1 && host.getAttribute('data-wa-picker-clamped') === 'true') {
-            return;
-        }
+            if (targetDx !== 0 || isClamped) {
+                var tp = bounds.transitionProperty;
+                if (tp && (tp.indexOf('all') !== -1 || tp.indexOf('translate') !== -1)) {
+                    host.style.setProperty('transition-property', 'opacity, transform', 'important');
+                }
+            }
 
-        var cs = window.getComputedStyle(host);
-        if (cs.transitionProperty && (cs.transitionProperty.indexOf('all') !== -1 || cs.transitionProperty.indexOf('translate') !== -1)) {
-            host.style.setProperty('transition-property', 'opacity, transform', 'important');
-        }
+            var isAnimatingScale = Math.abs(bounds.scaleX - 1) > 0.001;
+            var dxThreshold = isAnimatingScale ? 3 : 1;
+            if (isClamped && hasInlineTranslate && Math.abs(targetDx - prevDx) <= dxThreshold) {
+                return;
+            }
 
-        if (targetDx !== 0) {
-            host.style.setProperty('translate', targetDx + 'px 0px', 'important');
-            host.setAttribute('data-wa-picker-dx', String(targetDx));
-            host.setAttribute('data-wa-picker-clamped', 'true');
-        } else if (host.getAttribute('data-wa-picker-clamped') === 'true') {
-            host.style.removeProperty('translate');
-            host.removeAttribute('data-wa-picker-dx');
-            host.removeAttribute('data-wa-picker-clamped');
+            if (targetDx !== 0) {
+                host.style.setProperty('translate', targetDx + 'px 0px', 'important');
+                host.setAttribute('data-wa-picker-dx', String(targetDx));
+                host.setAttribute('data-wa-picker-clamped', 'true');
+            } else if (isClamped) {
+                host.style.removeProperty('translate');
+                host.removeAttribute('data-wa-picker-dx');
+                host.removeAttribute('data-wa-picker-clamped');
+            }
+        } finally {
+            if (host.__waPickerStyleObs) {
+                try {
+                    host.__waPickerStyleObs.takeRecords();
+                } catch (err) {}
+            }
+            host.__waPickerClamping = false;
         }
     }
 
     function attachPopupHostStyleObserver(host) {
         if (!host || host.nodeType !== 1 || host.__waPickerStyleObsAttached) return;
         host.__waPickerStyleObsAttached = true;
+        var cleanup = function() {
+            if (host.__waPickerStyleObsTimer) {
+                clearTimeout(host.__waPickerStyleObsTimer);
+                host.__waPickerStyleObsTimer = 0;
+            }
+            if (host.__waPickerStyleObs) {
+                try {
+                    host.__waPickerStyleObs.disconnect();
+                } catch (err) {}
+                host.__waPickerStyleObs = null;
+            }
+            host.__waPickerStyleObsAttached = false;
+        };
         var styleObs = new MutationObserver(function() {
             if (!host.isConnected) {
-                styleObs.disconnect();
+                cleanup();
                 return;
             }
+            if (host.__waPickerClamping) return;
+            var mainEl = document.getElementById('main');
+            var mainRect = mainEl ? mainEl.getBoundingClientRect() : null;
+            if (!isFloatingHostEligible(host, mainRect)) return;
             clampFloatingPickerViewport(host);
         });
-        styleObs.observe(host, { attributes: true, attributeFilter: ['style', 'class'] });
-        setTimeout(function() {
-            styleObs.disconnect();
-            host.__waPickerStyleObsAttached = false;
-        }, 360);
+        host.__waPickerStyleObs = styleObs;
+        styleObs.observe(host, { attributes: true, attributeFilter: ['style', 'class'], childList: true });
+        host.__waPickerStyleObsTimer = setTimeout(cleanup, 420);
     }
 
     function resolveFloatingPopupHost(el, mainEl, mainRect) {
         var host = el;
+        var initialRect = host.getBoundingClientRect();
+        var initialW = host.offsetWidth || initialRect.width;
+        var initialH = host.offsetHeight || initialRect.height;
+        var initialCs = window.getComputedStyle(host);
+        if ((initialCs.position === 'fixed' || initialCs.position === 'absolute') && initialH >= 110 && initialW >= 160) {
+            return host;
+        }
         for (var up = 0; up < 6 && host.parentElement && host.parentElement !== document.body && host.parentElement !== mainEl; up++) {
             var p = host.parentElement;
             if (p.id === 'app' || p.classList.contains('app-wrapper-web') || p.getAttribute('data-wa-flex-container') === 'true') break;
@@ -1186,6 +1473,7 @@
             if (mainRect && pH >= mainRect.height * 0.82 && pW >= mainRect.width * 0.88) break;
             if (p.querySelector('[role="application"]')) break;
             var pCs = window.getComputedStyle(p);
+            if (p.tagName === 'SPAN' && pCs.position === 'static' && host.tagName === 'DIV') break;
             host = p;
             if ((pCs.position === 'fixed' || pCs.position === 'absolute') && pH >= 110 && pW >= 160) break;
         }
@@ -1195,9 +1483,10 @@
     function syncFloatingPickerBounds() {
         var mainEl = document.getElementById('main');
         var mainRect = mainEl ? mainEl.getBoundingClientRect() : null;
+        var isPickerOpening = performance.now() < pickerOpeningUntil;
         var selector = '[data-animate-picker], [data-animate-modal-popup], [data-animate-dropdown-item], ' +
             '[role="dialog"], [role="menu"], [role="listbox"], #main [role="tablist"], #app > div > span [role="tablist"], #app > div > div [role="tablist"]';
-        if (performance.now() < pickerOpeningUntil) {
+        if (isPickerOpening) {
             selector += ', #app > div > span > div, #app > div > div > span > div';
         }
         var candidates = document.querySelectorAll(selector);
@@ -1211,14 +1500,16 @@
             var host = resolveFloatingPopupHost(el, mainEl, mainRect);
             if (!host || processedHosts.indexOf(host) !== -1) continue;
             processedHosts.push(host);
-            var hRect = host.getBoundingClientRect();
-            var hW = host.offsetWidth || hRect.width;
-            var hH = host.offsetHeight || hRect.height;
-            if (hW >= 160 && hH >= 110) {
-                if (host.matches('[data-animate-picker], [data-animate-modal-popup], [role="dialog"], [role="menu"], [role="listbox"]') ||
-                    host.querySelector('[role="tablist"], [data-animate-picker], input[type="search"], input[placeholder]')) {
+            if (isFloatingHostEligible(host, mainRect)) {
+                attachPopupHostStyleObserver(host);
+                clampFloatingPickerViewport(host);
+            } else if (isPickerOpening) {
+                var hRect = host.getBoundingClientRect();
+                var hW = host.offsetWidth || hRect.width;
+                var hH = host.offsetHeight || hRect.height;
+                var notFullScreen = !(mainRect && hH >= mainRect.height * 0.82 && hW >= mainRect.width * 0.88);
+                if (notFullScreen && !host.querySelector('[role="application"]')) {
                     attachPopupHostStyleObserver(host);
-                    clampFloatingPickerViewport(host);
                 }
             }
         }
@@ -1658,6 +1949,182 @@
         }
     }
 
+    var PANEL_ADAPTIVE_SELECTOR = '[data-wa-tab-side-column="true"], [data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]), [data-wa-right-column="true"]';
+    var PANEL_VISUAL_SCALE_MIN = 0.75;
+
+    function hasHorizontalScrollAncestor(el, stopAt) {
+        var cur = el;
+        while (cur && cur !== stopAt && cur !== document.body) {
+            var ovX = window.getComputedStyle(cur).overflowX;
+            if (ovX === 'auto' || ovX === 'scroll') return true;
+            cur = cur.parentElement;
+        }
+        return false;
+    }
+
+    function parseFixedPixelGridTracks(templateStr) {
+        if (!templateStr || templateStr === 'none') return null;
+        var parts = templateStr.trim().split(/\s+/);
+        if (parts.length < 2) return null;
+        var tracks = [];
+        var minW = Infinity;
+        var maxW = 0;
+        var total = 0;
+        for (var i = 0; i < parts.length; i++) {
+            var m = /^(\d+(?:\.\d+)?)px$/.exec(parts[i]);
+            if (!m) return null;
+            var val = parseFloat(m[1]);
+            if (!(val > 0)) return null;
+            tracks.push(val);
+            if (val < minW) minW = val;
+            if (val > maxW) maxW = val;
+            total += val;
+        }
+        if (maxW - minW > 2.5) return null;
+        return {
+            count: tracks.length,
+            trackW: Math.round(maxW * 10) / 10,
+            sumW: total
+        };
+    }
+
+    function updatePanelAdaptiveContent() {
+        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+        var panels = document.querySelectorAll(PANEL_ADAPTIVE_SELECTOR);
+        if (!panels || panels.length === 0) return;
+
+        for (var pi = 0; pi < panels.length; pi++) {
+            var panel = panels[pi];
+            var pRect = panel.getBoundingClientRect();
+            if (pRect.width < 40 || pRect.height < 40) continue;
+
+            // 1. Reflujo adaptable de grillas con columnas de ancho fijo (mantiene tamano nativo y legibilidad)
+            var candidates = panel.querySelectorAll('div, ul, ol, section');
+            var limit = Math.min(candidates.length, 450);
+            for (var ci = 0; ci < limit; ci++) {
+                var el = candidates[ci];
+                var isManagedGrid = el.hasAttribute('data-wa-p10-grid');
+                var cs = window.getComputedStyle(el);
+                if (cs.display !== 'grid' && cs.display !== 'inline-grid') {
+                    if (isManagedGrid) {
+                        el.style.removeProperty('grid-template-columns');
+                        el.removeAttribute('data-wa-p10-grid');
+                        el.removeAttribute('data-wa-p10-grid-native');
+                    }
+                    continue;
+                }
+                if (hasHorizontalScrollAncestor(el, panel)) continue;
+
+                var gap = parseFloat(cs.columnGap) || 0;
+                var padL = parseFloat(cs.paddingLeft) || 0;
+                var padR = parseFloat(cs.paddingRight) || 0;
+                var availW = Math.floor(el.clientWidth - padL - padR);
+                if (availW <= 0) continue;
+
+                var nativeMeta = null;
+                var savedAttr = el.getAttribute('data-wa-p10-grid-native');
+                if (savedAttr) {
+                    var metaParts = savedAttr.split(',');
+                    if (metaParts.length === 3) {
+                        nativeMeta = {
+                            count: parseInt(metaParts[0], 10),
+                            trackW: parseFloat(metaParts[1]),
+                            totalW: parseFloat(metaParts[2])
+                        };
+                    }
+                } else {
+                    var parsed = parseFixedPixelGridTracks(cs.gridTemplateColumns);
+                    if (parsed) {
+                        var totalW = parsed.sumW + gap * (parsed.count - 1);
+                        if (el.scrollWidth > el.clientWidth + 2 || totalW > availW + 2) {
+                            nativeMeta = {
+                                count: parsed.count,
+                                trackW: parsed.trackW,
+                                totalW: Math.round(totalW * 10) / 10
+                            };
+                            el.setAttribute('data-wa-p10-grid-native', nativeMeta.count + ',' + nativeMeta.trackW + ',' + nativeMeta.totalW);
+                        }
+                    }
+                }
+
+                if (!nativeMeta || !(nativeMeta.count >= 2) || !(nativeMeta.trackW > 0)) continue;
+
+                if (availW >= nativeMeta.totalW - 2) {
+                    if (isManagedGrid) {
+                        el.style.removeProperty('grid-template-columns');
+                        el.removeAttribute('data-wa-p10-grid');
+                    }
+                    continue;
+                }
+
+                var fitCols = Math.floor((availW + gap) / (nativeMeta.trackW + gap));
+                if (fitCols >= nativeMeta.count) {
+                    if (isManagedGrid) {
+                        el.style.removeProperty('grid-template-columns');
+                        el.removeAttribute('data-wa-p10-grid');
+                    }
+                } else if (fitCols >= 1) {
+                    var nextCols = (fitCols === 1 && nativeMeta.trackW > availW)
+                        ? 'minmax(0, 1fr)'
+                        : ('repeat(' + fitCols + ', ' + nativeMeta.trackW + 'px)');
+                    if (el.style.getPropertyValue('grid-template-columns') !== nextCols || !isManagedGrid) {
+                        el.style.setProperty('grid-template-columns', nextCols, 'important');
+                        el.setAttribute('data-wa-p10-grid', 'true');
+                    }
+                } else {
+                    if (el.style.getPropertyValue('grid-template-columns') !== 'minmax(0, 1fr)' || !isManagedGrid) {
+                        el.style.setProperty('grid-template-columns', 'minmax(0, 1fr)', 'important');
+                        el.setAttribute('data-wa-p10-grid', 'true');
+                    }
+                }
+            }
+
+            // 2. Fallback acotado solo para bloques visuales no textuales fuera de grillas y carruseles
+            var scaledEls = panel.querySelectorAll('[data-wa-p10-scaled="true"]');
+            for (var si = 0; si < scaledEls.length; si++) {
+                var sEl = scaledEls[si];
+                var natW = parseFloat(sEl.getAttribute('data-wa-p10-nat-w') || '0');
+                var sParent = sEl.parentElement;
+                var pAvail = sParent ? sParent.clientWidth : Math.floor(pRect.width);
+                if (!(natW > 0) || pAvail >= natW - 2 || hasHorizontalScrollAncestor(sEl, panel)) {
+                    sEl.style.removeProperty('zoom');
+                    sEl.removeAttribute('data-wa-p10-scaled');
+                    sEl.removeAttribute('data-wa-p10-nat-w');
+                } else {
+                    var updatedScale = Math.max(PANEL_VISUAL_SCALE_MIN, Math.min(1, Math.round((pAvail / natW) * 1000) / 1000));
+                    if (updatedScale >= 0.98) {
+                        sEl.style.removeProperty('zoom');
+                        sEl.removeAttribute('data-wa-p10-scaled');
+                        sEl.removeAttribute('data-wa-p10-nat-w');
+                    } else {
+                        sEl.style.setProperty('zoom', String(updatedScale), 'important');
+                    }
+                }
+            }
+
+            var mediaNodes = panel.querySelectorAll('img, canvas, video, svg');
+            var mediaLimit = Math.min(mediaNodes.length, 120);
+            for (var mi = 0; mi < mediaLimit; mi++) {
+                var mEl = mediaNodes[mi];
+                if (mEl.hasAttribute('data-wa-p10-scaled')) continue;
+                if (mEl.closest('[data-wa-p10-grid="true"], [data-wa-p10-scaled="true"]')) continue;
+                if (hasHorizontalScrollAncestor(mEl, panel)) continue;
+                var mRect2 = mEl.getBoundingClientRect();
+                if (mRect2.width < 64 || mRect2.height < 40) continue;
+                if (mRect2.right <= pRect.right + 4) continue;
+                var mParent = mEl.parentElement;
+                var mAvail = mParent && mParent.clientWidth > 0 ? mParent.clientWidth : Math.floor(pRect.width - 16);
+                if (mAvail <= 0 || mRect2.width <= mAvail + 4) continue;
+                var mScale = Math.max(PANEL_VISUAL_SCALE_MIN, Math.min(1, Math.round((mAvail / mRect2.width) * 1000) / 1000));
+                if (mScale < 0.98) {
+                    mEl.setAttribute('data-wa-p10-nat-w', String(Math.ceil(mRect2.width)));
+                    mEl.setAttribute('data-wa-p10-scaled', 'true');
+                    mEl.style.setProperty('zoom', String(mScale), 'important');
+                }
+            }
+        }
+    }
+
     function scheduleMainScaleUpdate() {
         if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
         if (mainScaleRafPending) return;
@@ -1666,11 +2133,23 @@
             mainScaleRafPending = false;
             if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
             updateMainAdaptiveScale();
+            updatePanelAdaptiveContent();
         });
+    }
+
+    var mainScaleResizeObserver = null;
+    var mainScaleObservedTargets = [];
+
+    function disconnectMainResizeObserver() {
+        if (mainScaleResizeObserver) {
+            mainScaleResizeObserver.disconnect();
+        }
+        mainScaleObservedTargets = [];
     }
 
     function ensureMainResizeObserver() {
         if (!window.ResizeObserver) return;
+        if (document.hidden) return;
         if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
         var containers = resolveLayoutContainers();
         var targets = [];
@@ -1679,15 +2158,42 @@
         var mainEl = document.getElementById('main');
         if (mainEl && targets.indexOf(mainEl) === -1) targets.push(mainEl);
 
-        for (var i = 0; i < targets.length; i++) {
-            var t = targets[i];
-            if (!t || t.__waMainScaleObserverAttached) continue;
-            t.__waMainScaleObserverAttached = true;
-            var ro = new ResizeObserver(function() {
+        var adaptivePanels = document.querySelectorAll(PANEL_ADAPTIVE_SELECTOR);
+        for (var ap = 0; ap < adaptivePanels.length; ap++) {
+            var apEl = adaptivePanels[ap];
+            if (apEl && targets.indexOf(apEl) === -1) targets.push(apEl);
+        }
+
+        if (!mainScaleResizeObserver) {
+            mainScaleResizeObserver = new ResizeObserver(function() {
+                if (document.hidden) return;
                 if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
                 scheduleMainScaleUpdate();
             });
-            ro.observe(t);
+        }
+
+        var nextObserved = [];
+        for (var p = 0; p < mainScaleObservedTargets.length; p++) {
+            var prev = mainScaleObservedTargets[p];
+            if (!prev || !prev.isConnected || targets.indexOf(prev) === -1) {
+                try {
+                    if (prev) mainScaleResizeObserver.unobserve(prev);
+                } catch (e) {}
+            } else {
+                nextObserved.push(prev);
+            }
+        }
+
+        for (var i = 0; i < targets.length; i++) {
+            var t = targets[i];
+            if (!t || nextObserved.indexOf(t) !== -1) continue;
+            mainScaleResizeObserver.observe(t);
+            nextObserved.push(t);
+        }
+
+        mainScaleObservedTargets = nextObserved;
+        if (adaptivePanels.length > 0) {
+            scheduleMainScaleUpdate();
         }
     }
 
@@ -2415,6 +2921,7 @@
                 child.removeAttribute('data-wa-right-column');
                 child.removeAttribute('data-wa-main-column');
                 child.removeAttribute('data-wa-tab-shell');
+                child.removeAttribute('data-wa-drawer-middle-active');
                 clearStaleInnerDrawers(child);
                 clearAuxInlineStyles(child);
 
@@ -2466,6 +2973,46 @@
                 child.style.setProperty('border', 'none', 'important');
                 child.style.setProperty('overflow', 'hidden', 'important');
             } else if (!isAfterMain) {
+                var middleDrawerEl = child.querySelector(':scope > [data-testid="drawer-middle"]');
+                if (middleDrawerEl && child.children.length >= 2) {
+                    var leftSlot = child.children[0];
+                    var leftSlotHasUi = !!(leftSlot && leftSlot !== middleDrawerEl && (
+                        leftSlot.querySelector('header, section, [role="region"], [role="heading"], h1, h2, input, [role="textbox"], [role="row"], [role="listitem"], [data-animate-drawer-left="true"], button, [role="button"], svg') !== null ||
+                        (leftSlot.innerText || '').trim().length > 0
+                    ));
+                    var middleHasUi = !!(
+                        middleDrawerEl.querySelector('header, section, [role="region"], [role="heading"], button, [role="button"], input, [role="textbox"], canvas, img, video, svg') !== null ||
+                        (middleDrawerEl.innerText || '').trim().length > 0
+                    );
+                    if (!leftSlotHasUi && middleHasUi) {
+                        var isSidebarAnimMid = !!(document.body && document.body.classList.contains('wa-sidebar-animating'));
+                        child.removeAttribute('data-wa-left-drawer');
+                        child.removeAttribute('data-wa-right-column');
+                        child.removeAttribute('data-wa-main-column');
+                        child.removeAttribute('data-wa-tab-shell');
+                        child.removeAttribute('data-wa-aux-empty');
+                        clearStaleInnerDrawers(child);
+                        clearAuxInlineStyles(child);
+
+                        var staleMidCols = child.querySelectorAll('[data-wa-side-column="true"], [data-wa-main-column="true"]');
+                        for (var smc = 0; smc < staleMidCols.length; smc++) {
+                            staleMidCols[smc].removeAttribute('data-wa-side-column');
+                            staleMidCols[smc].removeAttribute('data-wa-main-column');
+                            clearAuxInlineStyles(staleMidCols[smc]);
+                        }
+                        if (!isSidebarAnimMid) {
+                            for (var mcIdx = 0; mcIdx < child.children.length; mcIdx++) {
+                                clearAuxInlineStyles(child.children[mcIdx]);
+                            }
+                        }
+                        child.setAttribute('data-wa-rail-seam-host', 'true');
+                        child.setAttribute('data-wa-drawer-middle-active', 'true');
+                        continue;
+                    }
+                }
+                if (child.hasAttribute('data-wa-drawer-middle-active')) {
+                    child.removeAttribute('data-wa-drawer-middle-active');
+                }
                 if (child.hasAttribute('data-wa-aux-empty') || child.hasAttribute('data-wa-rail-seam-host')) {
                     if (child.hasAttribute('data-wa-rail-seam-host') && child.firstElementChild) {
                         clearAuxInlineStyles(child.firstElementChild);
@@ -3816,6 +4363,22 @@
         }
     }
 
+    var rightPanelResizeObserver = null;
+    var rightPanelObservedTarget = null;
+    var leftPanelResizeObserver = null;
+    var leftPanelObservedTarget = null;
+
+    function disconnectPanelResizeObservers() {
+        if (rightPanelResizeObserver) {
+            rightPanelResizeObserver.disconnect();
+        }
+        rightPanelObservedTarget = null;
+        if (leftPanelResizeObserver) {
+            leftPanelResizeObserver.disconnect();
+        }
+        leftPanelObservedTarget = null;
+    }
+
     function ensureRightResizer() {
         if (!rightResizerElement || !document.body.contains(rightResizerElement)) {
             rightResizerElement = document.getElementById('wa-custom-right-resizer');
@@ -3831,16 +4394,28 @@
             rightResizerElement.addEventListener('mousedown', onRightMouseDown);
         }
 
+        if (document.hidden) return;
         var rightCol = document.querySelector('[data-wa-right-column="true"]');
-        if (window.ResizeObserver && rightCol && !rightCol.__waRightResizeObserverAttached) {
-            rightCol.__waRightResizeObserverAttached = true;
-            var rightResizeObserver = new ResizeObserver(function() {
-                if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
-                if (!isRightDragging) {
-                    updateRightResizerPosition();
-                }
-            });
-            rightResizeObserver.observe(rightCol);
+        if (rightPanelObservedTarget && (rightPanelObservedTarget !== rightCol || !rightPanelObservedTarget.isConnected)) {
+            if (rightPanelResizeObserver) {
+                try {
+                    rightPanelResizeObserver.unobserve(rightPanelObservedTarget);
+                } catch (e) {}
+            }
+            rightPanelObservedTarget = null;
+        }
+        if (window.ResizeObserver && rightCol && rightPanelObservedTarget !== rightCol) {
+            if (!rightPanelResizeObserver) {
+                rightPanelResizeObserver = new ResizeObserver(function() {
+                    if (document.hidden) return;
+                    if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+                    if (!isRightDragging) {
+                        updateRightResizerPosition();
+                    }
+                });
+            }
+            rightPanelResizeObserver.observe(rightCol);
+            rightPanelObservedTarget = rightCol;
         }
     }
 
@@ -3869,18 +4444,31 @@
         var containers = resolveLayoutContainers();
         var targetEl = (containers && containers.sideColumn) ? containers.sideColumn : side;
 
-        if (window.ResizeObserver && targetEl && !targetEl.__waResizeObserverAttached) {
-            targetEl.__waResizeObserverAttached = true;
-            var resizeObserver = new ResizeObserver(function() {
-                if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
-                if (!isDragging) {
-                    updateLeftResizerPosition();
+        if (!document.hidden) {
+            if (leftPanelObservedTarget && (leftPanelObservedTarget !== targetEl || !leftPanelObservedTarget.isConnected)) {
+                if (leftPanelResizeObserver) {
+                    try {
+                        leftPanelResizeObserver.unobserve(leftPanelObservedTarget);
+                    } catch (e) {}
                 }
-                if (!isRightDragging) {
-                    updateRightResizerPosition();
+                leftPanelObservedTarget = null;
+            }
+            if (window.ResizeObserver && targetEl && leftPanelObservedTarget !== targetEl) {
+                if (!leftPanelResizeObserver) {
+                    leftPanelResizeObserver = new ResizeObserver(function() {
+                        if (document.hidden) return;
+                        if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
+                        if (!isDragging) {
+                            updateLeftResizerPosition();
+                        }
+                        if (!isRightDragging) {
+                            updateRightResizerPosition();
+                        }
+                    });
                 }
-            });
-            resizeObserver.observe(targetEl);
+                leftPanelResizeObserver.observe(targetEl);
+                leftPanelObservedTarget = targetEl;
+            }
         }
 
         updateResizerPosition();
@@ -4101,139 +4689,12 @@
         return false;
     }
 
-    var observer = new MutationObserver(function(mutations) {
-        var onlyInternal = mutations.length > 0;
-        var mainEl = document.getElementById('main');
-        var mainColEl = (cachedMainColumn && cachedMainColumn.isConnected)
-            ? cachedMainColumn
-            : document.querySelector('[data-wa-main-column="true"]');
-        var paneSideEl = document.getElementById('pane-side');
-        var sideEl = document.getElementById('side');
-        var mainHeaderEl = mainEl ? mainEl.querySelector('header') : null;
-        var mainFooterEl = mainEl ? mainEl.querySelector('footer') : null;
-        var tabShellEl = document.querySelector('[data-wa-tab-shell="true"]');
-        var rightColEl = document.querySelector('[data-wa-right-column="true"]');
-        var hasAddedPopupOrMain = false;
-        var isOpeningPickerNow = performance.now() < pickerOpeningUntil;
-        var isAnimatingNow = document.body && document.body.classList.contains('wa-sidebar-animating');
-        var addedGreenTargets = [];
-        var layoutInitialized = !!(sideEl && mainColEl && (sideEl.__waWidthApplied || sideEl.__waCompactApplied));
-
-        for (var m = 0; m < mutations.length; m++) {
-            var mut = mutations[m];
-            if (isInternalMutationRecord(mut)) continue;
-            onlyInternal = false;
-
-            var tgt = mut.target;
-            var inPaneSide = !!(tgt && paneSideEl && (tgt === paneSideEl || paneSideEl.contains(tgt)));
-            var inMain = !!(tgt && mainEl && (tgt === mainEl || mainEl.contains(tgt)));
-            var inMainCol = !inMain && !!(tgt && mainColEl && (tgt === mainColEl || mainColEl.contains(tgt)));
-            var inSide = !inPaneSide && !!(tgt && sideEl && (tgt === sideEl || sideEl.contains(tgt)));
-            var inTabShell = !!(tgt && tabShellEl && (tgt === tabShellEl || tabShellEl.contains(tgt)));
-            var inRightCol = !!(tgt && rightColEl && (tgt === rightColEl || rightColEl.contains(tgt)));
-
-            if (!layoutInitialized) {
-                dirtyLayout = true;
-            }
-
-            if (inPaneSide) {
-                dirtyPaneSide = true;
-            } else if (inMain) {
-                if (tgt === mainEl || (mainHeaderEl && (tgt === mainHeaderEl || mainHeaderEl.contains(tgt)))) {
-                    dirtyMainChanged = true;
-                    dirtyTheme = true;
-                } else if (mainFooterEl && (tgt === mainFooterEl || mainFooterEl.contains(tgt))) {
-                    if (isOpeningPickerNow || !(tgt.closest && tgt.closest('[contenteditable="true"], [role="textbox"]'))) {
-                        dirtyOverlay = true;
-                    }
-                }
-            } else if (inMainCol) {
-                dirtyMainChanged = true;
-                dirtyTheme = true;
-                if (isOpeningPickerNow) {
-                    dirtyOverlay = true;
-                }
-            } else if (inSide) {
-                dirtySideNav = true;
-            } else if (inTabShell) {
-                if (tgt === tabShellEl || !tabShellEl.querySelector('[data-wa-tab-side-column="true"]')) {
-                    dirtyLayout = true;
-                }
-            } else if (inRightCol) {
-                // Contenido interno del panel derecho: solo vigilar popups/overlays en added/removed
-            } else {
-                dirtyLayout = true;
-                dirtyOverlay = true;
-            }
-
-            if (mut.addedNodes && mut.addedNodes.length > 0) {
-                for (var an = 0; an < mut.addedNodes.length; an++) {
-                    var added = mut.addedNodes[an];
-                    if (!added || added.nodeType !== 1 || isInternalMutationNode(added)) continue;
-                    if (added.id === 'main') {
-                        dirtyMainChanged = true;
-                        dirtyTheme = true;
-                        if (!mainColEl) dirtyLayout = true;
-                    } else if (added.id === 'side' || added.id === 'pane-side') {
-                        dirtyLayout = true;
-                        dirtySideNav = true;
-                        dirtyTheme = true;
-                    } else if (!inPaneSide && added.querySelector && added.querySelector('#main')) {
-                        dirtyMainChanged = true;
-                        dirtyTheme = true;
-                        if (!mainColEl) dirtyLayout = true;
-                    }
-
-                    if (isOpeningPickerNow ||
-                        (!inPaneSide && nodeMatchesOverlayOrPopup(added)) ||
-                        (inPaneSide && added.matches && added.matches(POPUP_MUTATION_SELECTOR))) {
-                        hasAddedPopupOrMain = true;
-                        dirtyOverlay = true;
-                    }
-
-                    if (!isAnimatingNow && addedGreenTargets.length < 24 && added.closest &&
-                        added.closest('#side, [data-wa-nav-rail="true"], [data-wa-side-column="true"], [data-wa-tab-side-column="true"], [data-wa-left-drawer="true"], #app > div > header')) {
-                        addedGreenTargets.push(added);
-                    }
-                }
-            }
-
-            if (mut.removedNodes && mut.removedNodes.length > 0 && (!dirtyOverlay || (!dirtyLayout && !inPaneSide && !inMain))) {
-                for (var rn = 0; rn < mut.removedNodes.length; rn++) {
-                    var rem = mut.removedNodes[rn];
-                    if (!rem || rem.nodeType !== 1 || isInternalMutationNode(rem)) continue;
-                    if (!dirtyOverlay && !inPaneSide && nodeMatchesOverlayOrPopup(rem)) {
-                        dirtyOverlay = true;
-                    }
-                    if (!dirtyLayout && !inPaneSide && !inMain &&
-                        (rem.id === 'side' ||
-                         (rem.getAttribute && (rem.getAttribute('data-wa-tab-shell') === 'true' ||
-                                               rem.getAttribute('data-wa-tab-side-column') === 'true' ||
-                                               rem.getAttribute('data-wa-right-column') === 'true' ||
-                                               rem.getAttribute('data-wa-left-drawer') === 'true')))) {
-                        dirtyLayout = true;
-                    }
-                    if (dirtyOverlay && (dirtyLayout || inPaneSide || inMain)) break;
-                }
-            }
-        }
-        if (onlyInternal) return;
-
-        // Etiquetado incremental en microtask de addedNodes en barra lateral/rail para evitar delay de 220ms al clickear chats
-        if (addedGreenTargets.length > 0) {
-            for (var ag = 0; ag < addedGreenTargets.length; ag++) {
-                tagWhatsAppGreenSubtree(addedGreenTargets[ag], 120);
-            }
-        }
-
-        // Pre-paint clamping en microtask para evitar que el picker de emojis pinte fuera de pantalla en el frame 1
-        if (hasAddedPopupOrMain) {
-            syncFloatingPickerBounds();
-        }
-
+    function scheduleMutationSync() {
+        if (document.hidden) return;
         if (mutationSyncRaf) return;
         mutationSyncRaf = window.requestAnimationFrame(function() {
             mutationSyncRaf = null;
+            if (document.hidden) return;
             var runLayout = dirtyLayout;
             var runOverlay = dirtyOverlay;
             var runSideNav = dirtySideNav;
@@ -4296,11 +4757,279 @@
                 scheduleResizerOverlayCheck();
             }
         });
+    }
+
+    var pendingPaneGreenTargets = [];
+    var pendingPaneGreenTimer = null;
+    var pendingSideGreenTargets = [];
+    var pendingSideGreenRaf = null;
+
+    function flushPendingPaneGreenTargets() {
+        pendingPaneGreenTimer = null;
+        if (document.hidden || !pendingPaneGreenTargets.length) {
+            pendingPaneGreenTargets.length = 0;
+            return;
+        }
+        var batch = pendingPaneGreenTargets.splice(0, 12);
+        for (var i = 0; i < batch.length; i++) {
+            if (batch[i] && batch[i].isConnected) {
+                tagWhatsAppGreenSubtree(batch[i], 120);
+            }
+        }
+        if (pendingPaneGreenTargets.length > 0 && !pendingPaneGreenTimer) {
+            pendingPaneGreenTimer = setTimeout(flushPendingPaneGreenTargets, 80);
+        }
+    }
+
+    function scheduleDeferredGreenTagging(paneTargets, sideTargets) {
+        if (sideTargets.length > 0) {
+            for (var s = 0; s < sideTargets.length && pendingSideGreenTargets.length < 24; s++) {
+                if (pendingSideGreenTargets.indexOf(sideTargets[s]) === -1) {
+                    pendingSideGreenTargets.push(sideTargets[s]);
+                }
+            }
+            if (!pendingSideGreenRaf) {
+                pendingSideGreenRaf = window.requestAnimationFrame(function() {
+                    pendingSideGreenRaf = null;
+                    if (document.hidden || !pendingSideGreenTargets.length) {
+                        pendingSideGreenTargets.length = 0;
+                        return;
+                    }
+                    var batch = pendingSideGreenTargets.splice(0, 24);
+                    for (var i = 0; i < batch.length; i++) {
+                        if (batch[i] && batch[i].isConnected) {
+                            tagWhatsAppGreenSubtree(batch[i], 120);
+                        }
+                    }
+                });
+            }
+        }
+        if (paneTargets.length > 0) {
+            for (var p = 0; p < paneTargets.length && pendingPaneGreenTargets.length < 24; p++) {
+                if (pendingPaneGreenTargets.indexOf(paneTargets[p]) === -1) {
+                    pendingPaneGreenTargets.push(paneTargets[p]);
+                }
+            }
+            if (pendingPaneGreenTimer !== null) {
+                clearTimeout(pendingPaneGreenTimer);
+            }
+            pendingPaneGreenTimer = setTimeout(flushPendingPaneGreenTargets, 140);
+        }
+    }
+
+    var observer = new MutationObserver(function(mutations) {
+        if (document.hidden) return;
+        var onlyInternal = mutations.length > 0;
+        var mainEl = document.getElementById('main');
+        var mainColEl = (cachedMainColumn && cachedMainColumn.isConnected)
+            ? cachedMainColumn
+            : document.querySelector('[data-wa-main-column="true"]');
+        var paneSideEl = document.getElementById('pane-side');
+        var sideEl = document.getElementById('side');
+        var mainHeaderEl = mainEl ? mainEl.querySelector('header') : null;
+        var mainFooterEl = mainEl ? mainEl.querySelector('footer') : null;
+        var tabShellEl = document.querySelector('[data-wa-tab-shell="true"]');
+        var rightColEl = document.querySelector('[data-wa-right-column="true"]');
+        var hasAddedPopupOrMain = false;
+        var isOpeningPickerNow = performance.now() < pickerOpeningUntil;
+        var isAnimatingNow = document.body && document.body.classList.contains('wa-sidebar-animating');
+        var addedPaneGreenTargets = [];
+        var addedSideGreenTargets = [];
+        var layoutInitialized = !!(sideEl && mainColEl && (sideEl.__waWidthApplied || sideEl.__waCompactApplied));
+
+        for (var m = 0; m < mutations.length; m++) {
+            var mut = mutations[m];
+            if (isInternalMutationRecord(mut)) continue;
+            onlyInternal = false;
+
+            var tgt = mut.target;
+            var inPaneSide = !!(tgt && paneSideEl && (tgt === paneSideEl || paneSideEl.contains(tgt)));
+            var inMain = !!(tgt && mainEl && (tgt === mainEl || mainEl.contains(tgt)));
+            var inMainCol = !inMain && !!(tgt && mainColEl && (tgt === mainColEl || mainColEl.contains(tgt)));
+            var inSide = !inPaneSide && !!(tgt && sideEl && (tgt === sideEl || sideEl.contains(tgt)));
+            var inTabShell = !!(tgt && tabShellEl && (tgt === tabShellEl || tabShellEl.contains(tgt)));
+            var inRightCol = !!(tgt && rightColEl && (tgt === rightColEl || rightColEl.contains(tgt)));
+
+            if (!layoutInitialized) {
+                dirtyLayout = true;
+            }
+
+            if (inPaneSide) {
+                dirtyPaneSide = true;
+            } else if (inMain) {
+                if (tgt === mainEl || (mainHeaderEl && (tgt === mainHeaderEl || mainHeaderEl.contains(tgt)))) {
+                    dirtyMainChanged = true;
+                    dirtyTheme = true;
+                } else if (mainFooterEl && (tgt === mainFooterEl || mainFooterEl.contains(tgt))) {
+                    if (isOpeningPickerNow || !(tgt.closest && tgt.closest('[contenteditable="true"], [role="textbox"]'))) {
+                        dirtyOverlay = true;
+                    }
+                }
+            } else if (inMainCol) {
+                dirtyMainChanged = true;
+                dirtyTheme = true;
+                if (isOpeningPickerNow) {
+                    dirtyOverlay = true;
+                }
+            } else if (inSide) {
+                dirtySideNav = true;
+            } else if (inTabShell) {
+                if (tgt === tabShellEl || !tabShellEl.querySelector('[data-wa-tab-side-column="true"]')) {
+                    dirtyLayout = true;
+                }
+            } else if (inRightCol) {
+                // Si se desmonta o vacia el contenido del panel derecho al cerrarlo, resincronizar layout
+                if (mut.removedNodes && mut.removedNodes.length > 0 &&
+                    (tgt === rightColEl ||
+                     rightColEl.childElementCount === 0 ||
+                     !rightColEl.querySelector('header, section, button, [role="button"], input, img, svg'))) {
+                    dirtyLayout = true;
+                }
+            } else {
+                var isLiveRegion = !!(tgt && tgt.nodeType === 1 &&
+                    ((tgt.getAttribute && (tgt.getAttribute('aria-live') || tgt.getAttribute('role') === 'status' || tgt.getAttribute('role') === 'alert')) ||
+                     (tgt.closest && tgt.closest('[aria-live], [role="status"], [role="alert"]'))));
+                if (!isLiveRegion) {
+                    dirtyLayout = true;
+                    dirtyOverlay = true;
+                }
+            }
+
+            if (mut.addedNodes && mut.addedNodes.length > 0) {
+                for (var an = 0; an < mut.addedNodes.length; an++) {
+                    var added = mut.addedNodes[an];
+                    if (!added || added.nodeType !== 1 || isInternalMutationNode(added)) continue;
+                    if (added.id === 'main') {
+                        dirtyMainChanged = true;
+                        dirtyTheme = true;
+                        if (!mainColEl) dirtyLayout = true;
+                    } else if (added.id === 'side' || added.id === 'pane-side') {
+                        dirtyLayout = true;
+                        dirtySideNav = true;
+                        dirtyTheme = true;
+                    } else if (!inPaneSide && added.querySelector && added.querySelector('#main')) {
+                        dirtyMainChanged = true;
+                        dirtyTheme = true;
+                        if (!mainColEl) dirtyLayout = true;
+                    }
+
+                    if (isOpeningPickerNow ||
+                        (!inPaneSide && nodeMatchesOverlayOrPopup(added)) ||
+                        (inPaneSide && added.matches && added.matches(POPUP_MUTATION_SELECTOR))) {
+                        hasAddedPopupOrMain = true;
+                        dirtyOverlay = true;
+                    }
+
+                    if (!isAnimatingNow) {
+                        if (inPaneSide) {
+                            if (addedPaneGreenTargets.length < 24) {
+                                addedPaneGreenTargets.push(added);
+                            }
+                        } else if (addedSideGreenTargets.length < 24 && added.closest &&
+                            added.closest('#side, [data-wa-nav-rail="true"], [data-wa-side-column="true"], [data-wa-tab-side-column="true"], [data-wa-left-drawer="true"], #app > div > header')) {
+                            addedSideGreenTargets.push(added);
+                        }
+                    }
+                }
+            }
+
+            if (mut.removedNodes && mut.removedNodes.length > 0 && (!dirtyOverlay || (!dirtyLayout && !inPaneSide && !inMain))) {
+                for (var rn = 0; rn < mut.removedNodes.length; rn++) {
+                    var rem = mut.removedNodes[rn];
+                    if (!rem || rem.nodeType !== 1 || isInternalMutationNode(rem)) continue;
+                    if (!dirtyOverlay && !inPaneSide && nodeMatchesOverlayOrPopup(rem)) {
+                        dirtyOverlay = true;
+                    }
+                    if (!dirtyLayout && !inPaneSide && !inMain &&
+                        (rem.id === 'side' ||
+                         (rem.getAttribute && (rem.getAttribute('data-wa-tab-shell') === 'true' ||
+                                               rem.getAttribute('data-wa-tab-side-column') === 'true' ||
+                                               rem.getAttribute('data-wa-right-column') === 'true' ||
+                                               rem.getAttribute('data-wa-left-drawer') === 'true')))) {
+                        dirtyLayout = true;
+                    }
+                    if (dirtyOverlay && (dirtyLayout || inPaneSide || inMain)) break;
+                }
+            }
+        }
+        if (onlyInternal) return;
+
+        // Diferir el etiquetado de verdes fuera del microtask de MutationObserver:
+        // en #pane-side se agrupa tras 140ms para cero bloqueos durante scroll activo.
+        if (addedPaneGreenTargets.length > 0 || addedSideGreenTargets.length > 0) {
+            scheduleDeferredGreenTagging(addedPaneGreenTargets, addedSideGreenTargets);
+        }
+
+        // Pre-paint clamping en microtask para evitar que el picker de emojis pinte fuera de pantalla en el frame 1
+        if (hasAddedPopupOrMain) {
+            syncFloatingPickerBounds();
+        }
+
+        scheduleMutationSync();
     });
 
-    observer.observe(document.body, { childList: true, subtree: true });
+    var mainObserverConnected = false;
+    var visualObserversPaused = false;
+
+    function connectMainObserver() {
+        if (mainObserverConnected || !document.body) return;
+        observer.observe(document.body, { childList: true, subtree: true });
+        mainObserverConnected = true;
+    }
+
+    function pauseVisualObservers() {
+        if (visualObserversPaused) return;
+        visualObserversPaused = true;
+        if (mainObserverConnected) {
+            observer.disconnect();
+            mainObserverConnected = false;
+        }
+        if (mutationSyncRaf) {
+            window.cancelAnimationFrame(mutationSyncRaf);
+            mutationSyncRaf = null;
+        }
+        if (pendingPaneGreenTimer !== null) {
+            clearTimeout(pendingPaneGreenTimer);
+            pendingPaneGreenTimer = null;
+        }
+        pendingPaneGreenTargets.length = 0;
+        if (pendingSideGreenRaf) {
+            window.cancelAnimationFrame(pendingSideGreenRaf);
+            pendingSideGreenRaf = null;
+        }
+        pendingSideGreenTargets.length = 0;
+        disconnectMainResizeObserver();
+        disconnectPanelResizeObservers();
+        hideHoverTooltip();
+    }
+
+    function resumeVisualObservers() {
+        if (!visualObserversPaused) return;
+        visualObserversPaused = false;
+        connectMainObserver();
+        dirtyLayout = true;
+        dirtyOverlay = true;
+        dirtySideNav = true;
+        dirtyTheme = true;
+        scheduleMutationSync();
+    }
+
+    if (document.hidden) {
+        visualObserversPaused = true;
+    } else {
+        connectMainObserver();
+    }
+
+    document.addEventListener('visibilitychange', function() {
+        if (document.hidden) {
+            pauseVisualObservers();
+        } else {
+            resumeVisualObservers();
+        }
+    });
 
     window.addEventListener('resize', function() {
+        if (document.hidden) return;
         hideHoverTooltip();
         syncFloatingPickerBounds();
         if (!isCompactActive()) {

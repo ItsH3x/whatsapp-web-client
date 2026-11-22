@@ -1,6 +1,7 @@
 #ifndef LOCK_OVERLAY_H
 #define LOCK_OVERLAY_H
 
+#include <QColor>
 #include <QDialog>
 #include <QWidget>
 #include <QString>
@@ -91,6 +92,7 @@ public:
     void unlock();
     bool isLocked() const;
     QLineEdit* pinInput() const;
+    void setAccentColors(const QColor &accent, const QColor &accentFg = QColor());
 
     void shakePill();
     void shake_pill();
@@ -122,6 +124,7 @@ private slots:
 
 private:
     void initUi();
+    void applyAccentStyles();
 
     bool m_isLocked = false;
     QFrame *m_pillFrame = nullptr;
@@ -130,6 +133,8 @@ private:
     QPushButton *m_btnUnlock = nullptr;
     QLabel *m_lblStatus = nullptr;
     QPropertyAnimation *m_anim = nullptr;
+    QColor m_accentColor = QColor(0x00, 0xa8, 0x84);
+    QColor m_accentFgColor = QColor(0xff, 0xff, 0xff);
 
     static const QString s_pillStyleNormal;
     static const QString s_pillStyleError;

@@ -22,6 +22,7 @@
 #include <QContextMenuEvent>
 #include <QStyleOption>
 #include <QStyle>
+#include <cmath>
 
 // ============================================================================
 // PrivacyInstructionDialog Implementation
@@ -422,6 +423,38 @@ const QString LockOverlay::s_pillStyleError = QStringLiteral(R"(
     }
 )");
 
+namespace {
+
+double srgbChannelToLinear(int channel) {
+    const double v = static_cast<double>(channel) / 255.0;
+    return v <= 0.03928 ? (v / 12.92) : std::pow((v + 0.055) / 1.055, 2.4);
+}
+
+double relativeLuminance(const QColor &c) {
+    return 0.2126 * srgbChannelToLinear(c.red())
+         + 0.7152 * srgbChannelToLinear(c.green())
+         + 0.0722 * srgbChannelToLinear(c.blue());
+}
+
+double contrastRatio(const QColor &c1, const QColor &c2) {
+    const double l1 = relativeLuminance(c1);
+    const double l2 = relativeLuminance(c2);
+    const double hi = std::max(l1, l2);
+    const double lo = std::min(l1, l2);
+    return (hi + 0.05) / (lo + 0.05);
+}
+
+QColor computeLegibleButtonFg(const QColor &bg, const QColor &preferred) {
+    const QColor darkFg(0x11, 0x1b, 0x21);
+    const QColor lightFg(0xff, 0xff, 0xff);
+    if (preferred.isValid() && contrastRatio(bg, preferred) >= 4.5) {
+        return preferred;
+    }
+    return contrastRatio(bg, darkFg) >= contrastRatio(bg, lightFg) ? darkFg : lightFg;
+}
+
+} // namespace
+
 LockOverlay::LockOverlay(QWidget *parent)
     : QWidget(parent)
     , m_isLocked(false)
@@ -429,6 +462,14 @@ LockOverlay::LockOverlay(QWidget *parent)
     setAttribute(Qt::WA_NoSystemBackground, true);
     setFocusPolicy(Qt::StrongFocus);
     setVisible(false);
+
+    QSettings settings(QStringLiteral("WhatsAppWebClient"), QStringLiteral("WhatsAppWebClient"));
+    const QColor savedAccent(settings.value(QStringLiteral("last_accent_color")).toString());
+    const QColor savedFg(settings.value(QStringLiteral("last_accent_fg")).toString());
+    if (savedAccent.isValid()) {
+        m_accentColor = savedAccent;
+        m_accentFgColor = computeLegibleButtonFg(m_accentColor, savedFg);
+    }
 
     if (parent) {
         parent->installEventFilter(this);
@@ -485,23 +526,6 @@ void LockOverlay::initUi() {
     m_txtPin->setAlignment(Qt::AlignCenter);
     m_txtPin->setPlaceholderText(QStringLiteral("····"));
     m_txtPin->setValidator(new QIntValidator(0, 999999, this));
-    m_txtPin->setStyleSheet(QStringLiteral(R"(
-        QLineEdit {
-            background-color: rgba(0, 0, 0, 0.55);
-            border: 1px solid rgba(255, 255, 255, 0.15);
-            border-radius: 20px;
-            color: #ffffff;
-            font-size: 22px;
-            font-weight: bold;
-            letter-spacing: 6px;
-            padding: 6px 16px;
-            min-height: 28px;
-        }
-        QLineEdit:focus {
-            border: 1.5px solid #00a884;
-            background-color: rgba(0, 0, 0, 0.75);
-        }
-    )"));
 
     connect(m_txtPin, &QLineEdit::textChanged, this, &LockOverlay::onPinChanged);
     connect(m_txtPin, &QLineEdit::returnPressed, this, &LockOverlay::submitPin);
@@ -511,24 +535,9 @@ void LockOverlay::initUi() {
     m_btnUnlock->setFixedHeight(42);
     m_btnUnlock->setMinimumWidth(105);
     m_btnUnlock->setCursor(Qt::PointingHandCursor);
-    m_btnUnlock->setStyleSheet(QStringLiteral(R"(
-        QPushButton {
-            background-color: #00a884;
-            color: #ffffff;
-            font-size: 13px;
-            font-weight: bold;
-            border: none;
-            border-radius: 21px;
-            padding: 0 16px;
-        }
-        QPushButton:hover {
-            background-color: #02be94;
-        }
-        QPushButton:pressed {
-            background-color: #008f6f;
-        }
-    )"));
     connect(m_btnUnlock, &QPushButton::clicked, this, &LockOverlay::submitPin);
+
+    applyAccentStyles();
 
     inputLayout->addWidget(m_txtPin, 1);
     inputLayout->addWidget(m_btnUnlock);
@@ -545,6 +554,71 @@ void LockOverlay::initUi() {
     pillLayout->addWidget(m_lblStatus);
 
     mainLayout->addWidget(m_pillFrame);
+}
+
+void LockOverlay::applyAccentStyles() {
+    const QColor accent = m_accentColor.isValid() ? m_accentColor : QColor(0x00, 0xa8, 0x84);
+    const QColor fg = computeLegibleButtonFg(accent, m_accentFgColor);
+    const QColor hoverColor = accent.lightnessF() > 0.72 ? accent.darker(112) : accent.lighter(112);
+    const QColor pressedColor = accent.darker(118);
+
+    if (m_txtPin) {
+        m_txtPin->setStyleSheet(QStringLiteral(R"(
+            QLineEdit {
+                background-color: rgba(0, 0, 0, 0.55);
+                border: 1px solid rgba(255, 255, 255, 0.15);
+                border-radius: 20px;
+                color: #ffffff;
+                font-size: 22px;
+                font-weight: bold;
+                letter-spacing: 6px;
+                padding: 6px 16px;
+                min-height: 28px;
+            }
+            QLineEdit:focus {
+                border: 1.5px solid %1;
+                background-color: rgba(0, 0, 0, 0.75);
+            }
+        )").arg(accent.name()));
+    }
+
+    if (m_btnUnlock) {
+        m_btnUnlock->setStyleSheet(QStringLiteral(R"(
+            QPushButton {
+                background-color: %1;
+                color: %2;
+                font-size: 13px;
+                font-weight: bold;
+                border: none;
+                border-radius: 21px;
+                padding: 0 16px;
+            }
+            QPushButton:hover {
+                background-color: %3;
+            }
+            QPushButton:pressed {
+                background-color: %4;
+            }
+        )").arg(accent.name(), fg.name(), hoverColor.name(), pressedColor.name()));
+    }
+}
+
+void LockOverlay::setAccentColors(const QColor &accent, const QColor &accentFg) {
+    if (!accent.isValid()) {
+        return;
+    }
+    const QColor resolvedFg = computeLegibleButtonFg(accent, accentFg);
+    if (accent == m_accentColor && resolvedFg == m_accentFgColor) {
+        return;
+    }
+    m_accentColor = accent;
+    m_accentFgColor = resolvedFg;
+
+    QSettings settings(QStringLiteral("WhatsAppWebClient"), QStringLiteral("WhatsAppWebClient"));
+    settings.setValue(QStringLiteral("last_accent_color"), m_accentColor.name());
+    settings.setValue(QStringLiteral("last_accent_fg"), m_accentFgColor.name());
+
+    applyAccentStyles();
 }
 
 void LockOverlay::paintEvent(QPaintEvent *event) {
@@ -572,7 +646,7 @@ void LockOverlay::submitPin() {
             return;
         }
         ConfigManager::setPin(enteredPin);
-        m_lblStatus->setStyleSheet(QStringLiteral("color: #00a884; font-size: 12px; background: transparent;"));
+        m_lblStatus->setStyleSheet(QStringLiteral("color: %1; font-size: 12px; background: transparent;").arg(m_accentColor.name()));
         m_lblStatus->setText(QStringLiteral("PIN configurado correctamente."));
         QTimer::singleShot(600, this, &LockOverlay::unlock);
         return;

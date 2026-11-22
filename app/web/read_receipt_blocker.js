@@ -8,10 +8,23 @@
     window.__waHasRepliedInCurrentChat = false;
 
     var seenResetTimer = null;
+    var seenCoreTimer1 = null;
+    var seenCoreTimer2 = null;
     var readOnlyCheckTimer1 = null;
     var readOnlyCheckTimer2 = null;
     var lastContextRow = null;
     var lastContextRowTime = 0;
+
+    var clearSeenCoreTimers = function() {
+        if (seenCoreTimer1) {
+            clearTimeout(seenCoreTimer1);
+            seenCoreTimer1 = null;
+        }
+        if (seenCoreTimer2) {
+            clearTimeout(seenCoreTimer2);
+            seenCoreTimer2 = null;
+        }
+    };
 
     var clearReadOnlyCheckTimers = function() {
         if (readOnlyCheckTimer1) {
@@ -50,6 +63,7 @@
             clearTimeout(seenResetTimer);
             seenResetTimer = null;
         }
+        clearSeenCoreTimers();
         clearReadOnlyCheckTimers();
         window.__waMarkingSeenActive = false;
         window.__waHasRepliedInCurrentChat = false;
@@ -125,6 +139,7 @@
             clearTimeout(seenResetTimer);
             seenResetTimer = null;
         }
+        clearSeenCoreTimers();
         clearReadOnlyCheckTimers();
 
         window.__waMarkingSeenActive = true;
@@ -135,11 +150,15 @@
         // Emitir foco en t=0 para handlers sincronos (p. ej. "Marcar como leido" desde menu)
         dispatchFocusEvents();
 
-        setTimeout(function() {
+        seenCoreTimer1 = setTimeout(function() {
+            seenCoreTimer1 = null;
+            if (!window.__waMarkingSeenActive) return;
             if (window.__waTriggerSeenCore) window.__waTriggerSeenCore(!!skipRowReselect);
         }, 200);
 
-        setTimeout(function() {
+        seenCoreTimer2 = setTimeout(function() {
+            seenCoreTimer2 = null;
+            if (!window.__waMarkingSeenActive) return;
             if (window.__waTriggerSeenCore) window.__waTriggerSeenCore(!!skipRowReselect);
         }, 600);
 
@@ -148,6 +167,7 @@
             window.__waMarkingSeenActive = false;
             window.__waHasRepliedInCurrentChat = false;
             seenResetTimer = null;
+            clearSeenCoreTimers();
             try {
                 window.dispatchEvent(new FocusEvent('blur'));
                 window.dispatchEvent(new Event('blur'));
@@ -326,6 +346,7 @@
     };
 
     var recordPaneContextRow = function(event) {
+        if (!event || !event.isTrusted) return;
         var target = event.target;
         if (!target || !target.closest) return;
         if (target.closest('#pane-side')) {
@@ -336,18 +357,17 @@
             }
         }
     };
+    var pointerDownEventName = window.PointerEvent ? 'pointerdown' : 'mousedown';
     document.addEventListener('contextmenu', recordPaneContextRow, true);
-    document.addEventListener('pointerdown', recordPaneContextRow, true);
-    document.addEventListener('mousedown', recordPaneContextRow, true);
+    document.addEventListener(pointerDownEventName, recordPaneContextRow, true);
 
     var handleManualReadPointerDown = function(event) {
-        if (!event.isTrusted) return;
+        if (!event || !event.isTrusted) return;
         if (isMarkAsReadMenuAction(event.target)) {
             triggerManualMarkAsRead(true);
         }
     };
-    window.addEventListener('pointerdown', handleManualReadPointerDown, true);
-    window.addEventListener('mousedown', handleManualReadPointerDown, true);
+    window.addEventListener(pointerDownEventName, handleManualReadPointerDown, true);
 
     // Al cambiar de chat mediante clic en #pane-side o panel de comunidades, reiniciar incognito y revisar solo lectura
     document.addEventListener('click', function(event) {

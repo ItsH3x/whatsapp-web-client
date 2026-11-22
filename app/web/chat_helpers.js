@@ -41,508 +41,16 @@
         document.head.appendChild(style);
     }
 
-    // 1b. Deteccion dinamica del color de acento activo de WhatsApp Web y contraste legible
-    var DEFAULT_ACCENT_COLOR = '#00a884';
-    var ACCENT_CSS_VARS = [
-        '--unread-marker-background',
-        '--WDS-accent',
-        '--wds-accent',
-        '--accent-primary',
-        '--button-primary-background',
-        '--active-tab-marker',
-        '--checkbox-background',
-        '--switch-button-checked-color',
-        '--primary',
-        '--brand-primary',
-        '--teal',
-        '--teal-lighter'
-    ];
-
-    function parseCssColor(raw) {
-        if (!raw || typeof raw !== 'string') return null;
-        var s = raw.trim();
-        if (!s || s === 'transparent' || s === 'none' || s === 'inherit' || s === 'initial' || s === 'unset') {
-            return null;
-        }
-
-        var hexMatch = /^#([0-9a-f]{3,4}|[0-9a-f]{6}|[0-9a-f]{8})$/i.exec(s);
-        if (hexMatch) {
-            var h = hexMatch[1];
-            if (h.length === 3 || h.length === 4) {
-                var a3 = (h.length === 4) ? parseInt(h[3] + h[3], 16) / 255 : 1;
-                return {
-                    r: parseInt(h[0] + h[0], 16),
-                    g: parseInt(h[1] + h[1], 16),
-                    b: parseInt(h[2] + h[2], 16),
-                    a: a3
-                };
-            }
-            var a6 = (h.length === 8) ? parseInt(h.slice(6, 8), 16) / 255 : 1;
-            return {
-                r: parseInt(h.slice(0, 2), 16),
-                g: parseInt(h.slice(2, 4), 16),
-                b: parseInt(h.slice(4, 6), 16),
-                a: a6
-            };
-        }
-
-        var rgbMatch = /^rgba?\(\s*([\d.]+)\s*[,\s]\s*([\d.]+)\s*[,\s]\s*([\d.]+)(?:\s*[,/]\s*([\d.]+%?))?\s*\)$/i.exec(s);
-        if (rgbMatch) {
-            var alpha = 1;
-            if (rgbMatch[4] !== undefined) {
-                alpha = rgbMatch[4].indexOf('%') !== -1 ? parseFloat(rgbMatch[4]) / 100 : parseFloat(rgbMatch[4]);
-            }
-            return {
-                r: Math.round(Number(rgbMatch[1])),
-                g: Math.round(Number(rgbMatch[2])),
-                b: Math.round(Number(rgbMatch[3])),
-                a: isNaN(alpha) ? 1 : alpha
-            };
-        }
-
-        var srgbMatch = /^color\(\s*srgb\s+([\d.]+)\s+([\d.]+)\s+([\d.]+)(?:\s*\/\s*([\d.]+%?))?\s*\)$/i.exec(s);
-        if (srgbMatch) {
-            var sa = 1;
-            if (srgbMatch[4] !== undefined) {
-                sa = srgbMatch[4].indexOf('%') !== -1 ? parseFloat(srgbMatch[4]) / 100 : parseFloat(srgbMatch[4]);
-            }
-            return {
-                r: Math.round(Number(srgbMatch[1]) * 255),
-                g: Math.round(Number(srgbMatch[2]) * 255),
-                b: Math.round(Number(srgbMatch[3]) * 255),
-                a: isNaN(sa) ? 1 : sa
-            };
-        }
-
-        return null;
-    }
-
-    function resolveCssColorWithProbe(raw) {
-        var parsed = parseCssColor(raw);
-        if (parsed) return parsed;
-        if (!raw || typeof raw !== 'string' || !document.body) return null;
-        var s = raw.trim();
-        if (!s || s === 'transparent' || s === 'none') return null;
-
-        try {
-            var probe = window.__waAccentColorProbe;
-            if (!probe || !probe.isConnected) {
-                probe = document.createElement('span');
-                probe.style.cssText = 'position:fixed!important;left:-9999px!important;top:-9999px!important;width:0!important;height:0!important;visibility:hidden!important;pointer-events:none!important;';
-                document.body.appendChild(probe);
-                window.__waAccentColorProbe = probe;
-            }
-            probe.style.color = '';
-            probe.style.color = s;
-            if (!probe.style.color) return null;
-            return parseCssColor(window.getComputedStyle(probe).color);
-        } catch (e) {
-            return null;
-        }
-    }
-
-    function rgbToHslFull(rgb) {
-        var rn = Math.max(0, Math.min(255, rgb.r)) / 255;
-        var gn = Math.max(0, Math.min(255, rgb.g)) / 255;
-        var bn = Math.max(0, Math.min(255, rgb.b)) / 255;
-        var max = Math.max(rn, gn, bn);
-        var min = Math.min(rn, gn, bn);
-        var d = max - min;
-        var l = (max + min) / 2;
-        var s = 0;
-        var h = 0;
-        if (d !== 0) {
-            s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-            if (max === rn) h = ((gn - bn) / d) % 6;
-            else if (max === gn) h = (bn - rn) / d + 2;
-            else h = (rn - gn) / d + 4;
-            h *= 60;
-            if (h < 0) h += 360;
-        }
-        return { h: h, s: s, l: l };
-    }
-
-    function hslToRgbObj(h, s, l) {
-        var c = (1 - Math.abs(2 * l - 1)) * s;
-        var x = c * (1 - Math.abs((h / 60) % 2 - 1));
-        var m = l - c / 2;
-        var r1 = 0, g1 = 0, b1 = 0;
-        if (h < 60) { r1 = c; g1 = x; }
-        else if (h < 120) { r1 = x; g1 = c; }
-        else if (h < 180) { g1 = c; b1 = x; }
-        else if (h < 240) { g1 = x; b1 = c; }
-        else if (h < 300) { r1 = x; b1 = c; }
-        else { r1 = c; b1 = x; }
-        return { r: Math.round((r1 + m) * 255), g: Math.round((g1 + m) * 255), b: Math.round((b1 + m) * 255), a: 1 };
-    }
-
-    // Filtro cromatico HSL sin sesgo de luminancia contra los rojos
-    function isChromaticAccent(rgb) {
-        if (!rgb || rgb.a < 0.5) return false;
-        var chroma = Math.max(rgb.r, rgb.g, rgb.b) - Math.min(rgb.r, rgb.g, rgb.b);
-        if (chroma < 18) return false;
-        var hsl = rgbToHslFull(rgb);
-        return hsl.s >= 0.22 && hsl.l >= 0.08 && hsl.l <= 0.88;
-    }
-
-    // Eleva colores oscuros (burbujas en modo oscuro) a un acento vivo conservando el matiz
-    function normalizeAccentBrightness(rgb) {
-        var hsl = rgbToHslFull(rgb);
-        if (hsl.l >= 0.38) return rgb;
-        return hslToRgbObj(hsl.h, Math.max(hsl.s, 0.72), 0.46);
-    }
-
-    function probeAccentGeometric() {
-        var i, cs, col;
-        var mainEl = document.getElementById('main');
-        if (mainEl) {
-            var mainRect = mainEl.getBoundingClientRect();
-            if (mainRect.width > 0) {
-                var midThreshold = mainRect.left + mainRect.width * 0.52;
-                var leftMin = mainRect.left + 20;
-                var maxBubbleW = mainRect.width * 0.88;
-                var nodes = mainEl.querySelectorAll('div, span');
-                var checkedMain = 0;
-                for (var d = nodes.length - 1; d >= 0 && checkedMain < 600; d--) {
-                    var el = nodes[d];
-                    if (el.closest('header, footer')) continue;
-                    var br = el.getBoundingClientRect();
-                    if (br.right <= midThreshold || br.left <= leftMin) continue;
-                    if (br.width < 26 || br.width > maxBubbleW || br.height < 14 || br.height > 350) continue;
-                    checkedMain++;
-                    cs = window.getComputedStyle(el);
-                    col = parseCssColor(cs.backgroundColor);
-                    if (isChromaticAccent(col)) {
-                        try { localStorage.setItem('wa_last_theme_accent', JSON.stringify(col)); } catch (e) {}
-                        return col;
-                    }
-                    if (br.width >= 140 && Math.abs(br.width - br.height) <= 24) {
-                        col = parseCssColor(cs.borderTopColor);
-                        if (isChromaticAccent(col)) {
-                            try { localStorage.setItem('wa_last_theme_accent', JSON.stringify(col)); } catch (e) {}
-                            return col;
-                        }
-                    }
-                }
-            }
-        }
-        try {
-            var savedTheme = localStorage.getItem('wa_last_theme_accent');
-            if (savedTheme) {
-                var parsedSaved = JSON.parse(savedTheme);
-                if (isChromaticAccent(parsedSaved)) return parsedSaved;
-            }
-        } catch (e) {}
-        if (mainEl) {
-            var btns = mainEl.querySelectorAll('footer button, footer [role="button"], footer span[data-icon]');
-            for (i = 0; i < btns.length && i < 30; i++) {
-                col = parseCssColor(window.getComputedStyle(btns[i]).backgroundColor);
-                if (isChromaticAccent(col)) return col;
-            }
-        }
-        var pane = document.getElementById('pane-side');
-        if (pane) {
-            var smalls = pane.querySelectorAll('span, div');
-            var checked = 0;
-            for (i = 0; i < smalls.length && checked < 400; i++) {
-                var sm = smalls[i];
-                var txt = sm.textContent;
-                if (!txt || txt.length > 4 || !/^\d+$/.test(txt.trim())) continue;
-                checked++;
-                var r = sm.getBoundingClientRect();
-                if (r.width < 16 || r.width > 42 || r.height < 16 || r.height > 28) continue;
-                cs = window.getComputedStyle(sm);
-                if (parseFloat(cs.borderTopLeftRadius) < 8) continue;
-                col = parseCssColor(cs.backgroundColor);
-                if (isChromaticAccent(col)) return col;
-            }
-        }
-        return null;
-    }
-
-    function formatRgbCss(rgb) {
-        var r = Math.max(0, Math.min(255, Math.round(rgb.r)));
-        var g = Math.max(0, Math.min(255, Math.round(rgb.g)));
-        var b = Math.max(0, Math.min(255, Math.round(rgb.b)));
-        return 'rgb(' + r + ', ' + g + ', ' + b + ')';
-    }
-
-    function computeContrastFg(rgb) {
-        if (!rgb) return '#ffffff';
-        var toLinear = function(c) {
-            var s = Math.max(0, Math.min(255, c)) / 255;
-            return (s <= 0.03928) ? (s / 12.92) : Math.pow((s + 0.055) / 1.055, 2.4);
-        };
-        var lum = 0.2126 * toLinear(rgb.r) + 0.7152 * toLinear(rgb.g) + 0.0722 * toLinear(rgb.b);
-        return (lum > 0.42) ? '#111b21' : '#ffffff';
-    }
-
-    function pickChromaticFromElement(el, props) {
-        if (!el) return null;
-        var cs = window.getComputedStyle(el);
-        for (var i = 0; i < props.length; i++) {
-            var parsed = parseCssColor(cs.getPropertyValue(props[i]));
-            if (isChromaticAccent(parsed)) {
-                return parsed;
-            }
-        }
-        return null;
-    }
-
-    function detectWhatsAppAccentColor() {
-        var i, j, els, found;
-
-        // 0. Variables CSS inline en #main / #app > div / body / html
-        var inlineRoots = [
-            document.querySelector('#main > div'),
-            document.querySelector('#main'),
-            document.querySelector('#app > div'),
-            document.body,
-            document.documentElement
-        ];
-        for (i = 0; i < inlineRoots.length; i++) {
-            var rootEl = inlineRoots[i];
-            if (!rootEl || !rootEl.style || !rootEl.style.length) continue;
-            var rootCs = window.getComputedStyle(rootEl);
-            for (j = 0; j < rootEl.style.length; j++) {
-                var propName = rootEl.style[j];
-                if (!propName || propName.indexOf('--') !== 0 || propName.indexOf('--wa-dynamic-') === 0) continue;
-                if (/(accent|theme|unread|outgoing|brand|primary)/i.test(propName)) {
-                    found = resolveCssColorWithProbe(rootCs.getPropertyValue(propName));
-                    if (isChromaticAccent(found)) return found;
-                }
-            }
-        }
-
-        // 1. Sondeo geometrico sin data-testid
-        found = probeAccentGeometric();
-        if (found) return found;
-
-        // 1b. Elementos renderizados en #pane-side y #main (prioridad sobre variables globales)
-        var unreadSelectors = [
-            '#pane-side [data-testid="icon-unread-count"]',
-            '#pane-side [data-icon="unread-count"]',
-            '#pane-side span[aria-label*="no le" i]',
-            '#pane-side span[aria-label*="unread" i]'
-        ];
-        for (i = 0; i < unreadSelectors.length; i++) {
-            els = document.querySelectorAll(unreadSelectors[i]);
-            for (j = 0; j < els.length; j++) {
-                found = pickChromaticFromElement(els[j], ['background-color']);
-                if (found) return found;
-                if (els[j].parentElement) {
-                    found = pickChromaticFromElement(els[j].parentElement, ['background-color']);
-                    if (found) return found;
-                }
-            }
-        }
-
-        var mainSendSelectors = [
-            '#main [data-testid="compose-btn-send"]',
-            '#main button[data-testid="send"]',
-            '#main span[data-icon="wds-ic-send-filled"]',
-            '#main span[data-icon="send"]',
-            '#main [data-testid="ptt-btn"]',
-            '#main span[data-icon="ptt"]',
-            '#main span[data-icon="mic"]',
-            '#main span[data-icon="wds-ic-mic-filled"]',
-            '#main .message-out div',
-            '#main div[data-id^="true_"] div',
-            '#main .message-out [data-testid="msg-container"]'
-        ];
-        for (i = 0; i < mainSendSelectors.length; i++) {
-            els = document.querySelectorAll(mainSendSelectors[i]);
-            for (j = 0; j < els.length; j++) {
-                found = pickChromaticFromElement(els[j], ['background-color', 'color']);
-                if (found) return found;
-            }
-        }
-
-        var mainCheckSelectors = [
-            '#main [data-testid="msg-dblcheck"]',
-            '#main span[data-icon="msg-dblcheck"]'
-        ];
-        for (i = 0; i < mainCheckSelectors.length; i++) {
-            els = document.querySelectorAll(mainCheckSelectors[i]);
-            for (j = 0; j < els.length; j++) {
-                found = pickChromaticFromElement(els[j], ['color']);
-                if (found) return found;
-            }
-        }
-
-        var mainEl = document.querySelector('#main');
-        if (mainEl) {
-            var mainVars = ['--WDS-accent', '--WDS-systems-accent', '--accent-primary', '--outgoing-background'];
-            var mainStyle = window.getComputedStyle(mainEl);
-            for (i = 0; i < mainVars.length; i++) {
-                var mainVal = mainStyle.getPropertyValue(mainVars[i]);
-                var mainParsed = resolveCssColorWithProbe(mainVal);
-                if (isChromaticAccent(mainParsed)) {
-                    return mainParsed;
-                }
-            }
-        }
-
-        // 2. Variables CSS de tema en raiz, body o contenedores principales de la app (fallback)
-        var themeRoots = [
-            document.documentElement,
-            document.body,
-            document.querySelector('.app-wrapper-web'),
-            document.querySelector('#app > div')
-        ];
-        for (i = 0; i < ACCENT_CSS_VARS.length; i++) {
-            var varName = ACCENT_CSS_VARS[i];
-            for (j = 0; j < themeRoots.length; j++) {
-                var rootEl = themeRoots[j];
-                if (!rootEl) continue;
-                var val = window.getComputedStyle(rootEl).getPropertyValue(varName);
-                var parsed = resolveCssColorWithProbe(val);
-                if (isChromaticAccent(parsed)) {
-                    return parsed;
-                }
-            }
-        }
-
-        // 3. Indicadores de pestana activa en navegacion y botones primarios
-        var uiSelectors = [
-            '[role="navigation"] [aria-selected="true"]',
-            '[role="navigation"] [aria-pressed="true"]',
-            '[role="tablist"] [aria-selected="true"]',
-            'header [aria-pressed="true"]',
-            'button[data-testid="compose-btn-send"]',
-            '#main footer button[aria-label*="Enviar" i]',
-            '#main footer button[aria-label*="Send" i]',
-            '#side button[data-testid*="new-chat"]'
-        ];
-        for (i = 0; i < uiSelectors.length; i++) {
-            els = document.querySelectorAll(uiSelectors[i]);
-            for (j = 0; j < els.length; j++) {
-                found = pickChromaticFromElement(els[j], ['background-color', 'color', 'border-top-color']);
-                if (found) return found;
-                var iconChild = els[j].querySelector('svg, span[data-icon]');
-                if (iconChild) {
-                    found = pickChromaticFromElement(iconChild, ['color', 'fill']);
-                    if (found) return found;
-                }
-            }
-        }
-
-        return parseCssColor(DEFAULT_ACCENT_COLOR);
-    }
-
+    // 1b. El motor unificado de acentos dinamicos vive en sidebar_enhancements.js
     window.__waRefreshAccentColor = function() {
-        var root = document.documentElement;
-        if (!root) return DEFAULT_ACCENT_COLOR;
-
-        // Deteccion unificada compartida con sidebar_enhancements.js
         if (typeof window.__waDetectAndApplyAccent === 'function') {
             var shared = window.__waDetectAndApplyAccent();
             if (shared && shared.accent) {
-                window.__waAppliedDynamicAccent = shared.accent;
                 return shared.accent;
             }
         }
-
-        // Respetar --wa-dynamic-accent si fue definido externamente
-        var inlineAccent = root.style.getPropertyValue('--wa-dynamic-accent').trim();
-        var computedAccent = window.getComputedStyle(root).getPropertyValue('--wa-dynamic-accent').trim();
-        var externalAccent = inlineAccent || (!window.__waAppliedDynamicAccent ? computedAccent : '');
-
-        if (externalAccent && externalAccent !== window.__waAppliedDynamicAccent) {
-            var extRgb = resolveCssColorWithProbe(externalAccent);
-            if (extRgb && extRgb.a > 0.1) {
-                var extFg = root.style.getPropertyValue('--wa-dynamic-accent-fg').trim() || computeContrastFg(extRgb);
-                if (!root.style.getPropertyValue('--wa-dynamic-accent-fg').trim()) {
-                    root.style.setProperty('--wa-dynamic-accent-fg', extFg);
-                }
-                return externalAccent;
-            }
-        }
-
-        var detectedRgb = normalizeAccentBrightness(detectWhatsAppAccentColor() || parseCssColor(DEFAULT_ACCENT_COLOR));
-        var accentCss = formatRgbCss(detectedRgb);
-        var fgCss = computeContrastFg(detectedRgb);
-
-        if (window.__waAppliedDynamicAccent !== accentCss || root.style.getPropertyValue('--wa-dynamic-accent').trim() !== accentCss) {
-            root.style.setProperty('--wa-dynamic-accent', accentCss);
-            window.__waAppliedDynamicAccent = accentCss;
-        }
-        if (root.style.getPropertyValue('--wa-dynamic-accent-fg').trim() !== fgCss) {
-            root.style.setProperty('--wa-dynamic-accent-fg', fgCss);
-        }
-        return accentCss;
+        return window.__waAppliedDynamicAccent || '#00a884';
     };
-
-    window.__waRefreshAccentColor();
-
-    if (!window.__waThemeAccentObserver && window.MutationObserver && document.documentElement) {
-        var themeTimer = null;
-        var scheduleThemeRefresh = function() {
-            if (window.__waSidebarEnhancementsInitialized || window.__waDetectAndApplyAccent) return;
-            if (window.__waAltKeyDown === true) return;
-            if (themeTimer) return;
-            themeTimer = window.setTimeout(function() {
-                themeTimer = null;
-                if (window.__waSidebarEnhancementsInitialized || window.__waDetectAndApplyAccent) return;
-                if (window.__waAltKeyDown === true) return;
-                if (window.__waRefreshAccentColor) {
-                    window.__waRefreshAccentColor();
-                }
-                attachChatContainers();
-            }, 350);
-        };
-        var observedContainers = [];
-        var attachChatContainers = function() {
-            if (window.__waSidebarEnhancementsInitialized || window.__waDetectAndApplyAccent) return;
-            var targets = [document.querySelector('#main'), document.querySelector('#pane-side')];
-            for (var k = 0; k < targets.length; k++) {
-                var t = targets[k];
-                if (t && observedContainers.indexOf(t) === -1) {
-                    observedContainers.push(t);
-                    window.__waThemeAccentObserver.observe(t, {
-                        childList: true,
-                        subtree: true,
-                        attributes: true,
-                        attributeFilter: ['class', 'style', 'data-theme']
-                    });
-                }
-            }
-        };
-        window.__waThemeAccentObserver = new MutationObserver(function(mutations) {
-            if (window.__waSidebarEnhancementsInitialized || window.__waDetectAndApplyAccent) return;
-            if (window.__waAltKeyDown === true) return;
-            if (document.body && document.body.classList.contains('wa-sidebar-animating')) return;
-            for (var i = 0; i < mutations.length; i++) {
-                var m = mutations[i];
-                if (m.type === 'attributes') {
-                    if (m.attributeName === 'style' && m.target === document.documentElement) {
-                        var curInline = document.documentElement.style.getPropertyValue('--wa-dynamic-accent').trim();
-                        if (curInline === window.__waAppliedDynamicAccent) continue;
-                    }
-                    if (m.attributeName === 'class' && m.target === document.body) {
-                        continue;
-                    }
-                    scheduleThemeRefresh();
-                    break;
-                } else if (m.type === 'childList') {
-                    scheduleThemeRefresh();
-                    break;
-                }
-            }
-        });
-        window.__waThemeAccentObserver.observe(document.documentElement, {
-            attributes: true,
-            attributeFilter: ['class', 'data-theme', 'style']
-        });
-        if (document.body) {
-            window.__waThemeAccentObserver.observe(document.body, {
-                childList: true,
-                attributes: true,
-                attributeFilter: ['class', 'data-theme', 'style']
-            });
-        }
-        attachChatContainers();
-    }
 
     function normalizeChatTitle(s) {
         return (s || '')
@@ -579,8 +87,17 @@
     var validChatsBatchCache = null;
     var navBadgeTimer1 = null;
     var navBadgeTimer2 = null;
+    var navBadgeRafId = null;
+    var rowValidityCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+    var lastNavFromEl = null;
+    var lastNavTargetEl = null;
+    var lastNavAt = 0;
 
     function clearNavBadgeTimers() {
+        if (navBadgeRafId !== null) {
+            window.cancelAnimationFrame(navBadgeRafId);
+            navBadgeRafId = null;
+        }
         if (navBadgeTimer1 !== null) {
             clearTimeout(navBadgeTimer1);
             navBadgeTimer1 = null;
@@ -605,15 +122,12 @@
             if (!node || !node.isConnected) return null;
             if (node.getAttribute('data-wa-compact-hide') === 'true' ||
                 (node.classList && node.classList.contains('wa-archived-row')) ||
+                (node.style && (node.style.display === 'none' || node.style.visibility === 'hidden')) ||
                 (node.closest && node.closest('[data-wa-compact-hide="true"]'))) {
                 return null;
             }
             var rect = node.getBoundingClientRect();
             if (rect.width < 30 || rect.height < 40 || rect.height > 140) {
-                return null;
-            }
-            var cs = window.getComputedStyle(node);
-            if (!cs || cs.display === 'none' || cs.visibility === 'hidden') {
                 return null;
             }
             return rect;
@@ -638,13 +152,15 @@
             pushRawNode(roleNodes[r]);
         }
 
-        // Estrategia B: Celdas de la lista virtualizada con transform translateY o translate3d
-        var virtualNodes = pane.querySelectorAll('div[style*="translateY"], div[style*="translate3d"]');
-        for (var v = 0; v < virtualNodes.length; v++) {
-            var vNode = virtualNodes[v];
-            var semRow = vNode.querySelector('[role="row"], [role="listitem"]') || vNode;
-            if (!hasRawNode(semRow) && !hasRawNode(vNode)) {
-                pushRawNode(semRow);
+        // Estrategia B (fallback): solo si Estrategia A no devolvio filas
+        if (!rawItems.length) {
+            var virtualNodes = pane.querySelectorAll('div[style*="translateY"], div[style*="translate3d"]');
+            for (var v = 0; v < virtualNodes.length; v++) {
+                var vNode = virtualNodes[v];
+                var semRow = vNode.querySelector('[role="row"], [role="listitem"]') || vNode;
+                if (!hasRawNode(semRow) && !hasRawNode(vNode)) {
+                    pushRawNode(semRow);
+                }
             }
         }
 
@@ -681,10 +197,22 @@
 
         var validEntries = [];
         var chatContentSelector = 'img, svg, span[data-icon], span[title], span[dir="auto"], div[data-testid*="cell-frame"], [data-wa-avatar-col="true"]';
+        var cacheNow = performance.now();
         for (var k = 0; k < dedupedItems.length; k++) {
             var entry = dedupedItems[k];
             var el = entry.el;
 
+            if (rowValidityCache) {
+                var cachedRow = rowValidityCache.get(el);
+                if (cachedRow && (cacheNow - cachedRow.at) < 400) {
+                    if (cachedRow.valid) {
+                        validEntries.push(entry);
+                    }
+                    continue;
+                }
+            }
+
+            var isValidRow = true;
             // Deteccion de chat anclado / fijado (pin):
             // Si contiene el icono de fijado, es obligatoriamente un chat valido y NUNCA debe descartarse como archivado
             var isPinned = el.querySelector('span[data-icon*="pin"], [data-testid*="pin"]') !== null;
@@ -693,34 +221,43 @@
                 // Filtrar si es la fila de Archivados por icono, atributo o texto
                 var hasArchiveIcon = el.querySelector('span[data-icon*="archiv"], [data-testid*="archiv"], [aria-label*="archiv" i]') !== null;
                 if (hasArchiveIcon) {
-                    continue;
+                    isValidRow = false;
                 }
 
-                var title = extractRowTitle(el).trim().toLowerCase();
-                if (/^(archivados|archived|arquivadas)/i.test(title)) {
-                    continue;
+                if (isValidRow) {
+                    var title = extractRowTitle(el).trim().toLowerCase();
+                    if (/^(archivados|archived|arquivadas)/i.test(title)) {
+                        isValidRow = false;
+                    }
                 }
 
-                var fullText = (el.textContent || el.innerText || '').trim().toLowerCase();
-                if (/^(archivados|archived|arquivadas)(\s*\d+)?$/i.test(fullText)) {
-                    continue;
-                }
-
-                // Descartar filas informativas de cifrado que pudieran montarse como row/listitem
-                var hasAvatarOrTitle = el.querySelector('img, span[title], div[data-testid="cell-frame-title"]') !== null;
-                if (!hasAvatarOrTitle &&
-                    (el.querySelector('span[data-icon*="lock"], [data-testid*="encrypt"]') !== null ||
-                     /(cifrad|extremo a extremo|end-to-end|encrypt|criptograf)/i.test(fullText))) {
-                    continue;
+                if (isValidRow) {
+                    var fullText = (el.textContent || '').trim().toLowerCase();
+                    if (/^(archivados|archived|arquivadas)(\s*\d+)?$/i.test(fullText)) {
+                        isValidRow = false;
+                    } else {
+                        // Descartar filas informativas de cifrado que pudieran montarse como row/listitem
+                        var hasAvatarOrTitle = el.querySelector('img, span[title], div[data-testid="cell-frame-title"]') !== null;
+                        if (!hasAvatarOrTitle &&
+                            (el.querySelector('span[data-icon*="lock"], [data-testid*="encrypt"]') !== null ||
+                             /(cifrad|extremo a extremo|end-to-end|encrypt|criptograf)/i.test(fullText))) {
+                            isValidRow = false;
+                        }
+                    }
                 }
             }
 
             // Verificar que contiene la estructura minima de un chat real (avatar o contenido de texto)
-            if (el.querySelector(chatContentSelector) === null) {
-                continue;
+            if (isValidRow && el.querySelector(chatContentSelector) === null) {
+                isValidRow = false;
             }
 
-            validEntries.push(entry);
+            if (rowValidityCache) {
+                rowValidityCache.set(el, { valid: isValidRow, at: cacheNow });
+            }
+            if (isValidRow) {
+                validEntries.push(entry);
+            }
         }
 
         // Ordenar visualmente usando la coordenada top cacheada (cero getBoundingClientRect dentro de sort)
@@ -929,8 +466,8 @@
 
         var isClickableEl = function(el) {
             if (!isElementVisible(el, 1, 1)) return false;
-            var cs = window.getComputedStyle(el);
-            return cs.pointerEvents !== 'none';
+            if (el.style && el.style.pointerEvents === 'none') return false;
+            return true;
         };
 
         var isActionButton = function(el) {
@@ -940,26 +477,26 @@
         };
 
         var clickTarget = null;
+        var isCompactMode = !!(document.body && document.body.classList.contains('wa-sidebar-compact'));
 
-        // Prioridad 1 (modo normal): columna de texto del chat cuando es visible
-        var normalSelectors = [
-            'div[data-testid="cell-frame-title"] span',
-            'div[data-testid="cell-frame-title"]',
-            'span[title]',
-            'span[dir="auto"]',
-            '[role="gridcell"]:not(:first-child)'
-        ];
-        for (var ns = 0; ns < normalSelectors.length; ns++) {
-            var nCand = target.querySelector(normalSelectors[ns]);
-            if (nCand && isClickableEl(nCand)) {
-                clickTarget = nCand;
-                break;
+        var tryNormalSelectors = function() {
+            var normalSelectors = [
+                'div[data-testid="cell-frame-title"] span',
+                'div[data-testid="cell-frame-title"]',
+                'span[title]',
+                'span[dir="auto"]',
+                '[role="gridcell"]:not(:first-child)'
+            ];
+            for (var ns = 0; ns < normalSelectors.length; ns++) {
+                var nCand = target.querySelector(normalSelectors[ns]);
+                if (nCand && isClickableEl(nCand)) {
+                    clickTarget = nCand;
+                    return;
+                }
             }
-        }
+        };
 
-        // Prioridad 2 (modo compacto 70px): la columna de texto esta oculta (display: none / 0px),
-        // por lo que clicamos el contenedor interno visible del chat (evitando botones de foto/estado)
-        if (!clickTarget) {
+        var tryCompactSelectors = function() {
             var compactSelectors = [
                 '[data-wa-avatar-col="true"]',
                 '[role="gridcell"]',
@@ -977,6 +514,18 @@
                         break;
                     }
                 }
+            }
+        };
+
+        if (isCompactMode) {
+            tryCompactSelectors();
+            if (!clickTarget) {
+                tryNormalSelectors();
+            }
+        } else {
+            tryNormalSelectors();
+            if (!clickTarget) {
+                tryCompactSelectors();
             }
         }
 
@@ -1114,6 +663,7 @@
 
     // 7. Navegacion secuencial por chats (+1 abajo, -1 arriba)
     window.__waNavigateChat = function(offset) {
+        var navNow = performance.now();
         var snap = computeValidChatsSnapshot();
         var validChats = snap.all;
         if (!validChats.length) return -1;
@@ -1121,6 +671,17 @@
         validChatsBatchCache = snap;
         try {
             var currentIndex = window.__waGetCurrentChatIndex(true);
+            // Si React aun no comprometio aria-selected del salto anterior (< 300ms),
+            // evitar re-seleccionar el mismo chat tomando como base el destino logico previo.
+            if (lastNavTargetEl && lastNavTargetEl.isConnected && (navNow - lastNavAt) < 300) {
+                var currentEl = currentIndex >= 0 ? validChats[currentIndex] : null;
+                if (currentEl === lastNavFromEl) {
+                    var prevTargetIdx = validChats.indexOf(lastNavTargetEl);
+                    if (prevTargetIdx !== -1) {
+                        currentIndex = prevTargetIdx;
+                    }
+                }
+            }
             var targetIndex = 0;
 
             if (currentIndex === -1) {
@@ -1141,9 +702,6 @@
             }
 
             if (targetIndex === currentIndex && currentIndex !== -1) {
-                if (window.__waShowAltBadges && window.__waAltKeyDown) {
-                    window.__waShowAltBadges();
-                }
                 return targetIndex;
             }
 
@@ -1155,6 +713,10 @@
             }
 
             var target = validChats[targetIndex];
+            lastNavFromEl = (currentIndex >= 0 && currentIndex < validChats.length) ? validChats[currentIndex] : null;
+            lastNavTargetEl = target || null;
+            lastNavAt = navNow;
+
             var didScroll = false;
             if (target && window.__waSelectChatElement) {
                 didScroll = !!window.__waSelectChatElement(target);
@@ -1164,20 +726,21 @@
             }
 
             clearNavBadgeTimers();
-            if (window.__waShowAltBadges && window.__waAltKeyDown) {
-                window.__waShowAltBadges();
+            // Evitar llamar __waShowAltBadges() sincronamente justo tras el click (causaba reflow de 95-136ms).
+            // Si la lista no se desplazo, los badges visibles 1..9 no cambiaron de fila; solo refrescar si hubo scroll.
+            if (didScroll && window.__waShowAltBadges && window.__waAltKeyDown) {
+                navBadgeRafId = window.requestAnimationFrame(function() {
+                    navBadgeRafId = null;
+                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
+                        window.__waShowAltBadges();
+                    }
+                });
                 navBadgeTimer1 = setTimeout(function() {
                     navBadgeTimer1 = null;
                     if (window.__waAltKeyDown && window.__waShowAltBadges) {
                         window.__waShowAltBadges();
                     }
-                }, 90);
-                navBadgeTimer2 = setTimeout(function() {
-                    navBadgeTimer2 = null;
-                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
-                        window.__waShowAltBadges();
-                    }
-                }, 240);
+                }, 140);
             }
 
             return targetIndex;
@@ -1316,7 +879,7 @@
             childList: true,
             subtree: true,
             attributes: true,
-            attributeFilter: ['style', 'class', 'aria-selected', 'data-wa-compact-hide']
+            attributeFilter: ['style', 'data-wa-compact-hide']
         };
 
         var ensurePaneBadgeObserver = function(pane) {

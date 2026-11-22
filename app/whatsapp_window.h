@@ -100,6 +100,7 @@ private slots:
 private:
     void handleNotification(std::unique_ptr<QWebEngineNotification> notification);
     void ensureLockOverlay();
+    void syncLockOverlayAccent();
     void ensureDownloadDir();
     void setupZoom();
     void setupChatShortcuts();
