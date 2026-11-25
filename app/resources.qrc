@@ -1,12 +1,19 @@
 <RCC>
     <qresource prefix="/web">
-        <file alias="chat_helpers.js">web/chat_helpers.js</file>
         <file alias="read_receipt_blocker.js">web/read_receipt_blocker.js</file>
         <file alias="styles/theme_accents.css">web/styles/theme_accents.css</file>
         <file alias="styles/layout_columns.css">web/styles/layout_columns.css</file>
         <file alias="styles/resizers_overlays.css">web/styles/resizers_overlays.css</file>
         <file alias="styles/compact_mode.css">web/styles/compact_mode.css</file>
-        <file alias="sidebar_enhancements.js">web/sidebar_enhancements.js</file>
+        <file alias="modules/core_utils.js">web/modules/core_utils.js</file>
+        <file alias="modules/accent_theme.js">web/modules/accent_theme.js</file>
+        <file alias="modules/layout_columns.js">web/modules/layout_columns.js</file>
+        <file alias="modules/resizers_overlays.js">web/modules/resizers_overlays.js</file>
+        <file alias="modules/compact_mode.js">web/modules/compact_mode.js</file>
+        <file alias="modules/bootstrap.js">web/modules/bootstrap.js</file>
+        <file alias="modules/chat_navigation.js">web/modules/chat_navigation.js</file>
+        <file alias="modules/alt_badges.js">web/modules/alt_badges.js</file>
+        <file alias="modules/chat_bridge_actions.js">web/modules/chat_bridge_actions.js</file>
     </qresource>
 </RCC>
 

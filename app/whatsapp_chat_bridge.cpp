@@ -62,7 +62,11 @@ void WhatsAppClient::setupChatShortcuts() {
 }
 
 QString WhatsAppClient::getInitChatHelpersJs() const {
-    static const QString script = loadWebAsset(QStringLiteral(":/web/chat_helpers.js"));
+    static const QString script = loadConcatenatedWebAssets({
+        QStringLiteral(":/web/modules/chat_navigation.js"),
+        QStringLiteral(":/web/modules/alt_badges.js"),
+        QStringLiteral(":/web/modules/chat_bridge_actions.js"),
+    }, QStringLiteral("\n\n"));
     return script;
 }
 
@@ -73,7 +77,14 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
 
 QString WhatsAppClient::getSidebarEnhancementsJs() const {
     static const QString script = []() {
-        QString js = loadWebAsset(QStringLiteral(":/web/sidebar_enhancements.js"));
+        QString js = loadConcatenatedWebAssets({
+            QStringLiteral(":/web/modules/core_utils.js"),
+            QStringLiteral(":/web/modules/accent_theme.js"),
+            QStringLiteral(":/web/modules/layout_columns.js"),
+            QStringLiteral(":/web/modules/resizers_overlays.js"),
+            QStringLiteral(":/web/modules/compact_mode.js"),
+            QStringLiteral(":/web/modules/bootstrap.js"),
+        }, QStringLiteral("\n\n"));
         const QString css = loadConcatenatedWebAssets({
             QStringLiteral(":/web/styles/theme_accents.css"),
             QStringLiteral(":/web/styles/layout_columns.css"),
@@ -149,7 +160,7 @@ void WhatsAppClient::runChatJs(const QString &body, std::function<void(const QVa
     if (!m_browser || !m_browser->page()) {
         return;
     }
-    const QString wrapped = QStringLiteral("(function(){ if (!window.__waGetValidChats || !window.__waSelectChatElement || !window.__waNavigateChat || !window.__waShowAltBadges || !window.__waFindAndOpenChat) { return '__wa_need_init__'; }\n")
+    const QString wrapped = QStringLiteral("(function(){ if (!window.__waGetValidChats || !window.__waSelectChatElement || !window.__waNavigateChat || !window.__waShowAltBadges || !window.__waFindAndOpenChat || !window.__waScrapeRecentChats || !window.__waSendMessage) { return '__wa_need_init__'; }\n")
                             + body + QStringLiteral("\n})();");
     m_browser->page()->runJavaScript(wrapped, [this, body, callback, retried](const QVariant &result) {
         if (result.toString() == QLatin1String("__wa_need_init__")) {
@@ -207,43 +218,9 @@ void WhatsAppClient::hideChatBadges() {
 }
 
 void WhatsAppClient::scrapeRecentChats() {
-    QString js = R"JS(
-    (function() {
-        var chats = [];
-        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats() : [];
-        if (!validChats.length) {
-            var pane = document.getElementById('pane-side');
-            if (!pane) return JSON.stringify(chats);
-            validChats = pane.querySelectorAll('[role="row"], [role="listitem"]');
-        }
-
-        var count = Math.min(validChats.length, 10);
-        for (var i = 0; i < count; i++) {
-            var row = validChats[i];
-            var titleEl = row.querySelector('span[title]') || row.querySelector('span[dir="auto"]');
-            var lastMsgEl = row.querySelector('span[data-testid="last-msg-status"]') ||
-                            row.querySelector('span.matched-text') ||
-                            row.querySelector('div[data-testid="cell-frame-secondary"] span span') ||
-                            row.querySelector('[role="gridcell"]:last-child span');
-            if (titleEl) {
-                var nameText = titleEl.getAttribute('title') || titleEl.textContent || '';
-                if (nameText.trim()) {
-                    chats.push({
-                        name: nameText.trim(),
-                        lastMsg: lastMsgEl ? lastMsgEl.textContent.substring(0, 50).trim() : ''
-                    });
-                }
-            }
-        }
-        return JSON.stringify(chats);
-    })();
-    )JS";
-
-    if (m_browser && m_browser->page()) {
-        m_browser->page()->runJavaScript(js, [this](const QVariant &result) {
-            onChatsScraped(result.toString());
-        });
-    }
+    runChatJs(QStringLiteral("return window.__waScrapeRecentChats();"), [this](const QVariant &result) {
+        onChatsScraped(result.toString());
+    });
 }
 
 void WhatsAppClient::onChatsScraped(const QString &result) {
@@ -265,7 +242,12 @@ void WhatsAppClient::onChatsScraped(const QString &result) {
 }
 
 void WhatsAppClient::openChat(const QString &chatName) {
-    show();
+    if (isMinimized()) {
+        showNormal();
+    } else {
+        show();
+    }
+    raise();
     activateWindow();
 
     const QString jsonChat = toJsStringLiteral(chatName);
@@ -287,150 +269,6 @@ void WhatsAppClient::openChat(const QString &chatName) {
 void WhatsAppClient::sendWhatsAppMessage(const QString &chatName, const QString &text) {
     const QString jsonChat = toJsStringLiteral(chatName);
     const QString jsonText = toJsStringLiteral(text);
-
-    QString js = QString(R"JS(
-        var targetChat = %1;
-        var msgText = %2;
-        return window.__waFindAndOpenChat(targetChat, function() {
-            var isVisible = function(el) {
-                if (!el || !el.isConnected) return false;
-                try {
-                    var style = window.getComputedStyle(el);
-                    if (style && (style.display === 'none' || style.visibility === 'hidden')) return false;
-                } catch (e) {}
-                if (window.innerWidth > 0 && window.innerHeight > 0 && el.getBoundingClientRect) {
-                    var rect = el.getBoundingClientRect();
-                    return rect.width > 0 && rect.height > 0;
-                }
-                return true;
-            };
-
-            var findComposer = function() {
-                var selectors = [
-                    '#main footer div[contenteditable="true"]',
-                    '#main div[contenteditable="true"][data-tab="10"]',
-                    '#main div[contenteditable="true"][role="textbox"]'
-                ];
-                for (var i = 0; i < selectors.length; i++) {
-                    var matches = document.querySelectorAll(selectors[i]);
-                    for (var j = 0; j < matches.length; j++) {
-                        if (isVisible(matches[j])) {
-                            return matches[j];
-                        }
-                    }
-                }
-                return null;
-            };
-
-            var findSendButton = function() {
-                var roots = [];
-                var footer = document.querySelector('#main footer');
-                if (footer) roots.push(footer);
-                roots.push(document);
-                var selectors = [
-                    'span[data-icon="wds-ic-send-filled"]',
-                    'span[data-icon="send"]',
-                    'span[data-testid="send"]',
-                    'button[data-testid="compose-btn-send"]',
-                    'button[data-tab="11"]',
-                    'button[aria-label="Enviar"]',
-                    'button[aria-label="Send"]'
-                ];
-                for (var r = 0; r < roots.length; r++) {
-                    for (var s = 0; s < selectors.length; s++) {
-                        var matches = roots[r].querySelectorAll(selectors[s]);
-                        for (var j = 0; j < matches.length; j++) {
-                            var btn = matches[j].closest('button, [role="button"]') || matches[j];
-                            if (btn && !btn.disabled && btn.getAttribute('aria-disabled') !== 'true' && isVisible(btn)) {
-                                return btn;
-                            }
-                        }
-                    }
-                }
-                return null;
-            };
-
-            var triggerSeen = function() {
-                if (window.__waTriggerTemporarySeen) {
-                    window.__waTriggerTemporarySeen();
-                } else if (window.__waTriggerSeen) {
-                    setTimeout(window.__waTriggerSeen, 200);
-                    setTimeout(window.__waTriggerSeen, 600);
-                } else {
-                    window.__waMarkingSeenActive = false;
-                }
-            };
-
-            var composerAttempts = 0;
-            var maxComposerAttempts = 25;
-            var pollComposer = function() {
-                composerAttempts++;
-                var composer = findComposer();
-                if (!composer) {
-                    if (composerAttempts < maxComposerAttempts) {
-                        setTimeout(pollComposer, 100);
-                    }
-                    return;
-                }
-
-                window.__waMarkingSeenActive = true;
-                composer.focus();
-                try {
-                    var range = document.createRange();
-                    range.selectNodeContents(composer);
-                    range.collapse(false);
-                    var sel = window.getSelection();
-                    if (sel) {
-                        sel.removeAllRanges();
-                        sel.addRange(range);
-                    }
-                } catch (e) {}
-
-                document.execCommand('insertText', false, msgText);
-                try {
-                    composer.dispatchEvent(new InputEvent('input', {
-                        bubbles: true,
-                        inputType: 'insertText',
-                        data: msgText
-                    }));
-                } catch (e) {}
-
-                var sendAttempts = 0;
-                var maxSendAttempts = 10;
-                var pollSend = function() {
-                    sendAttempts++;
-                    var btn = findSendButton();
-                    if (btn) {
-                        btn.click();
-                        triggerSeen();
-                        return;
-                    }
-                    if (sendAttempts < maxSendAttempts) {
-                        setTimeout(pollSend, 80);
-                        return;
-                    }
-                    var remainingText = (composer.innerText || composer.textContent || '').replace(/[\u200B\uFEFF]/g, '').trim();
-                    if (remainingText.length > 0) {
-                        composer.dispatchEvent(new KeyboardEvent('keydown', {
-                            key: 'Enter',
-                            code: 'Enter',
-                            keyCode: 13,
-                            which: 13,
-                            bubbles: true,
-                            cancelable: true
-                        }));
-                        triggerSeen();
-                    } else {
-                        window.__waMarkingSeenActive = false;
-                    }
-                };
-                setTimeout(pollSend, 80);
-            };
-
-            setTimeout(pollComposer, 100);
-        });
-    )JS").arg(jsonChat, jsonText);
-
-    runChatJs(js);
+    runChatJs(QStringLiteral("return window.__waSendMessage(%1, %2);").arg(jsonChat, jsonText));
 }
 

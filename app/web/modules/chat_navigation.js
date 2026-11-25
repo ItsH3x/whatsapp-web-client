@@ -1,56 +1,103 @@
+/* Modulo JS 7: chat_navigation.js
+ * Responsabilidad: descubrimiento y filtrado de chats validos en #pane-side (excluyendo Archivados
+ * y avisos de cifrado), seleccion compatible con React 18, deteccion del indice activo, navegacion
+ * secuencial, busqueda con scroll progresivo sobre lista virtualizada y gestion de listeners de
+ * #pane-side con eventos de inversion de control (onPaneReady, onPaneScroll, onNavigate).
+ * Dependencias: ninguna dentro de window.__waApp (solo APIs nativas del navegador y ganchos
+ * opcionales de read_receipt_blocker.js: __waCancelTemporarySeen, __waScheduleReadOnlyChatCheck).
+ */
 (function() {
-    // 1. Inyectar estilos CSS para scrollbar y badges de atajos
-    if (!document.getElementById('wa-alt-badge-styles')) {
-        var style = document.createElement('style');
-        style.id = 'wa-alt-badge-styles';
-        style.textContent = `
-            ::-webkit-scrollbar { width: 6px !important; height: 6px !important; }
-            ::-webkit-scrollbar-track { background: transparent !important; }
-            ::-webkit-scrollbar-thumb { background: rgba(128, 128, 128, 0.25) !important; border-radius: 3px !important; }
-            ::-webkit-scrollbar-thumb:hover { background: rgba(128, 128, 128, 0.45) !important; }
-            .wa-alt-badge {
-                position: absolute !important;
-                display: flex !important;
-                align-items: center !important;
-                justify-content: center !important;
-                width: 20px !important;
-                height: 20px !important;
-                line-height: 1 !important;
-                text-align: center !important;
-                font-size: 12px !important;
-                font-weight: 600 !important;
-                font-family: inherit !important;
-                color: var(--wa-dynamic-accent-fg, #111b21) !important;
-                background: var(--wa-dynamic-accent, #00a884) !important;
-                border: none !important;
-                outline: none !important;
-                border-radius: 50% !important;
-                pointer-events: none !important;
-                z-index: 999999 !important;
-                box-shadow: 0 1px 4px rgba(0, 0, 0, 0.35) !important;
-                box-sizing: border-box !important;
-                padding: 0 !important;
-                margin: 0 !important;
-                animation: wa-badge-pop 0.1s cubic-bezier(0.175, 0.885, 0.32, 1.275) !important;
-            }
-            @keyframes wa-badge-pop {
-                0% { transform: scale(0.3); opacity: 0; }
-                100% { transform: scale(1); opacity: 1; }
-            }
-        `;
-        document.head.appendChild(style);
+    'use strict';
+    var app = window.__waApp = window.__waApp || {};
+    if (app.chatNavigation &&
+        typeof window.__waGetValidChats === 'function' &&
+        typeof window.__waSelectChatElement === 'function' &&
+        typeof window.__waNavigateChat === 'function' &&
+        typeof window.__waFindAndOpenChat === 'function') {
+        if (typeof app.chatNavigation.ensurePaneListeners === 'function') {
+            app.chatNavigation.ensurePaneListeners();
+        }
+        return;
     }
 
-    // 1b. El motor unificado de acentos dinamicos vive en sidebar_enhancements.js
-    window.__waRefreshAccentColor = function() {
-        if (typeof window.__waDetectAndApplyAccent === 'function') {
-            var shared = window.__waDetectAndApplyAccent();
-            if (shared && shared.accent) {
-                return shared.accent;
-            }
+    var CHAT_CONTENT_SELECTOR = 'img, svg, span[data-icon], span[title], span[dir="auto"], div[data-testid*="cell-frame"], [data-wa-avatar-col="true"]';
+    var ROW_VALIDITY_TTL_MS = 400;
+    var NAV_PENDING_COMMIT_MS = 300;
+
+    var validChatsBatchCache = null;
+    var rowValidityCache = typeof WeakMap === 'function' ? new WeakMap() : null;
+    var lastNavFromEl = null;
+    var lastNavTargetEl = null;
+    var lastNavAt = 0;
+
+    var paneReadyListeners = [];
+    var paneScrollListeners = [];
+    var navigateListeners = [];
+
+    function addListener(list, listener) {
+        if (typeof listener !== 'function') return function() {};
+        if (list.indexOf(listener) === -1) {
+            list.push(listener);
         }
-        return window.__waAppliedDynamicAccent || '#00a884';
-    };
+        return function() {
+            removeListener(list, listener);
+        };
+    }
+
+    function removeListener(list, listener) {
+        var idx = list.indexOf(listener);
+        if (idx !== -1) {
+            list.splice(idx, 1);
+        }
+    }
+
+    function notifyListeners(list, payload) {
+        if (!list.length) return;
+        var snapshot = list.slice();
+        for (var i = 0; i < snapshot.length; i++) {
+            try {
+                snapshot[i](payload);
+            } catch (e) {}
+        }
+    }
+
+    function onPaneReady(listener) {
+        return addListener(paneReadyListeners, listener);
+    }
+
+    function offPaneReady(listener) {
+        removeListener(paneReadyListeners, listener);
+    }
+
+    function onPaneScroll(listener) {
+        return addListener(paneScrollListeners, listener);
+    }
+
+    function offPaneScroll(listener) {
+        removeListener(paneScrollListeners, listener);
+    }
+
+    function onNavigate(listener) {
+        return addListener(navigateListeners, listener);
+    }
+
+    function offNavigate(listener) {
+        removeListener(navigateListeners, listener);
+    }
+
+    // Gestion de listeners pasivos de #pane-side sin acoplar la capa de badges
+    function ensurePaneListeners() {
+        var pane = document.getElementById('pane-side');
+        if (!pane) return null;
+        if (!pane.__waPaneScrollAttached) {
+            pane.__waPaneScrollAttached = true;
+            pane.addEventListener('scroll', function(event) {
+                notifyListeners(paneScrollListeners, { pane: pane, event: event });
+            }, { passive: true });
+        }
+        notifyListeners(paneReadyListeners, pane);
+        return pane;
+    }
 
     function normalizeChatTitle(s) {
         return (s || '')
@@ -82,36 +129,10 @@
         return text;
     }
 
-    // 2. Funcion para obtener chats validos ignorando completamente la pestana de Archivados
-    // y capturando todas las conversaciones visibles (fijadas, propias y normales) en su orden visual exacto.
-    var validChatsBatchCache = null;
-    var navBadgeTimer1 = null;
-    var navBadgeTimer2 = null;
-    var navBadgeRafId = null;
-    var rowValidityCache = typeof WeakMap === 'function' ? new WeakMap() : null;
-    var lastNavFromEl = null;
-    var lastNavTargetEl = null;
-    var lastNavAt = 0;
-
-    function clearNavBadgeTimers() {
-        if (navBadgeRafId !== null) {
-            window.cancelAnimationFrame(navBadgeRafId);
-            navBadgeRafId = null;
-        }
-        if (navBadgeTimer1 !== null) {
-            clearTimeout(navBadgeTimer1);
-            navBadgeTimer1 = null;
-        }
-        if (navBadgeTimer2 !== null) {
-            clearTimeout(navBadgeTimer2);
-            navBadgeTimer2 = null;
-        }
-    }
-
+    // Obtiene chats validos ignorando la pestana de Archivados y capturando todas las
+    // conversaciones visibles (fijadas, propias y normales) en su orden visual exacto.
     function computeValidChatsSnapshot() {
-        if (window.__waEnsurePaneListeners) {
-            window.__waEnsurePaneListeners();
-        }
+        ensurePaneListeners();
         var pane = document.getElementById('pane-side');
         if (!pane || !isElementVisible(pane, 20, 20)) {
             return { all: [], visible: [] };
@@ -196,7 +217,6 @@
         }
 
         var validEntries = [];
-        var chatContentSelector = 'img, svg, span[data-icon], span[title], span[dir="auto"], div[data-testid*="cell-frame"], [data-wa-avatar-col="true"]';
         var cacheNow = performance.now();
         for (var k = 0; k < dedupedItems.length; k++) {
             var entry = dedupedItems[k];
@@ -204,7 +224,7 @@
 
             if (rowValidityCache) {
                 var cachedRow = rowValidityCache.get(el);
-                if (cachedRow && (cacheNow - cachedRow.at) < 400) {
+                if (cachedRow && (cacheNow - cachedRow.at) < ROW_VALIDITY_TTL_MS) {
                     if (cachedRow.valid) {
                         validEntries.push(entry);
                     }
@@ -248,7 +268,7 @@
             }
 
             // Verificar que contiene la estructura minima de un chat real (avatar o contenido de texto)
-            if (isValidRow && el.querySelector(chatContentSelector) === null) {
+            if (isValidRow && el.querySelector(CHAT_CONTENT_SELECTOR) === null) {
                 isValidRow = false;
             }
 
@@ -284,179 +304,17 @@
         return { all: allChats, visible: visibleChats };
     }
 
-    window.__waGetValidChats = function(skipViewportFilter) {
+    function getValidChats(skipViewportFilter) {
         if (validChatsBatchCache) {
             return (skipViewportFilter ? validChatsBatchCache.all : validChatsBatchCache.visible).slice();
         }
         var snap = computeValidChatsSnapshot();
         return skipViewportFilter ? snap.all : snap.visible;
-    };
+    }
 
-    // 3. Funcion para mostrar badges sobre la esquina de la foto de perfil sin depender de cell-frame-container
-    window.__waShowAltBadges = function() {
-        // Reutiliza los badges existentes: solo crea (con animacion) los que faltan,
-        // actualiza posicion/etiqueta de los ya visibles y elimina los sobrantes.
-        var validChats = window.__waGetValidChats();
-        var count = Math.min(validChats.length, 10);
-        var keep = [];
-
-        for (var i = 0; i < count; i++) {
-            var keyLabel = (i < 9) ? String(i + 1) : '0';
-            var chatRow = validChats[i];
-
-            var rowRect = chatRow.getBoundingClientRect();
-            if (rowRect.width <= 0 || rowRect.height <= 0) continue;
-
-            var candidate = null;
-            var isCompactRow = (rowRect.width <= 85) || document.body.classList.contains('wa-sidebar-compact');
-
-            // 1. Imagen de perfil directa (img o svg image para squircles como DiDi Food) y visible en la columna izquierda
-            var imgs = chatRow.querySelectorAll('img:not(.emoji):not([data-plain-text])');
-            for (var m = 0; m < imgs.length; m++) {
-                if (!isElementVisible(imgs[m], 30, 30)) continue;
-                var imgRect = imgs[m].getBoundingClientRect();
-                if (imgRect.width <= 70 && (imgRect.left - rowRect.left) < 75) {
-                    candidate = imgs[m];
-                    break;
-                }
-            }
-            if (!candidate) {
-                var svgImg = chatRow.querySelector('svg image');
-                if (svgImg) {
-                    var svgHost = svgImg.closest('svg');
-                    if (svgHost && isElementVisible(svgHost, 30, 30)) {
-                        var svgRect = svgHost.getBoundingClientRect();
-                        if (svgRect.width <= 70 && (svgRect.left - rowRect.left) < 75) {
-                            candidate = svgHost;
-                        }
-                    }
-                }
-            }
-
-            // 2. Contenedor de avatar etiquetado en modo compacto (49x49 centrado)
-            if (!candidate) {
-                var avatarCol = chatRow.querySelector('[data-wa-avatar-col="true"]');
-                if (avatarCol && isElementVisible(avatarCol, 30, 30)) {
-                    var avRect = avatarCol.getBoundingClientRect();
-                    if (avRect.width <= 65 && avRect.height <= 65) {
-                        candidate = avatarCol;
-                    }
-                }
-            }
-
-            // 3. Anillo de historia o boton de avatar circular
-            if (!candidate) {
-                var buttons = chatRow.querySelectorAll('div[role="button"]');
-                for (var b = 0; b < buttons.length; b++) {
-                    if (!isElementVisible(buttons[b], 35, 35)) continue;
-                    var btnRect = buttons[b].getBoundingClientRect();
-                    // El avatar siempre esta ubicado en la columna izquierda de la fila
-                    if (btnRect.width <= 65 && btnRect.height <= 65 && (btnRect.left - rowRect.left) < 75) {
-                        candidate = buttons[b];
-                        break;
-                    }
-                }
-            }
-
-            // 4. Icono o SVG de avatar (contactos o chats propios sin foto de perfil personalizada)
-            if (!candidate) {
-                var icons = chatRow.querySelectorAll('span[data-icon="default-user"], span[data-icon="default-group"], span[data-icon="community-outline"], span[data-icon*="avatar"], span[data-icon*="default-"], span[data-icon*="channel"], span[data-icon*="newsletter"], svg');
-                for (var ic = 0; ic < icons.length; ic++) {
-                    if (!isElementVisible(icons[ic], 20, 20)) continue;
-                    var icRect = icons[ic].getBoundingClientRect();
-                    if ((icRect.left - rowRect.left) < 75 && icRect.width <= 65) {
-                        var pDiv = icons[ic].closest('div');
-                        if (pDiv && pDiv !== chatRow && chatRow.contains(pDiv)) {
-                            var pRect = pDiv.getBoundingClientRect();
-                            if (pRect.width >= 30 && pRect.width <= 65 && pRect.height >= 30 && pRect.height <= 65) {
-                                candidate = pDiv;
-                            } else {
-                                candidate = icons[ic];
-                            }
-                        } else {
-                            candidate = icons[ic];
-                        }
-                        break;
-                    }
-                }
-            }
-
-            // 5. Busqueda por dimensiones tipicas de avatar en la columna izquierda
-            if (!candidate) {
-                var descendants = chatRow.querySelectorAll('div, span');
-                for (var d = 0; d < descendants.length; d++) {
-                    if (!isElementVisible(descendants[d], 35, 35)) continue;
-                    var rect = descendants[d].getBoundingClientRect();
-                    if (rect.width <= 65 && rect.height <= 65 && (rect.left - rowRect.left) < 75) {
-                        candidate = descendants[d];
-                        break;
-                    }
-                }
-            }
-
-            var cx, cy;
-            var candRadius = 24.5;
-            if (candidate) {
-                var candRect = candidate.getBoundingClientRect();
-                cx = (candRect.left - rowRect.left) + (candRect.width / 2);
-                cy = (candRect.top - rowRect.top) + (candRect.height / 2);
-                candRadius = Math.min(candRect.width, candRect.height) / 2;
-            } else {
-                // Fallback geometrico: en modo compacto se centra en rowRect.width / 2; en modo normal cx = 36.5
-                cx = isCompactRow ? (rowRect.width / 2) : 36.5;
-                cy = rowRect.height / 2;
-            }
-
-            var badgeTop = Math.round(cy - candRadius - 3);
-            var badgeLeft = Math.round(cx - candRadius - 3);
-
-            // Clamping estricto dentro de la fila para evitar recorte en modo compacto (70px) o fila 0
-            var maxTop = Math.max(2, Math.floor(rowRect.height - 22));
-            var maxLeft = Math.max(2, Math.floor(rowRect.width - 22));
-            badgeTop = Math.max(2, Math.min(badgeTop, maxTop));
-            badgeLeft = Math.max(2, Math.min(badgeLeft, maxLeft));
-
-            if (getComputedStyle(chatRow).position === 'static') {
-                chatRow.style.position = 'relative';
-            }
-            if (chatRow.style.getPropertyValue('overflow') !== 'visible' ||
-                chatRow.style.getPropertyPriority('overflow') !== 'important') {
-                chatRow.style.setProperty('overflow', 'visible', 'important');
-            }
-
-            var badge = null;
-            for (var cb = 0; cb < chatRow.children.length; cb++) {
-                if (chatRow.children[cb].classList && chatRow.children[cb].classList.contains('wa-alt-badge')) {
-                    badge = chatRow.children[cb];
-                    break;
-                }
-            }
-            if (!badge) {
-                badge = document.createElement('span');
-                badge.className = 'wa-alt-badge';
-                chatRow.appendChild(badge);
-            }
-            if (badge.textContent !== keyLabel) badge.textContent = keyLabel;
-            var topStr = badgeTop + 'px';
-            var leftStr = badgeLeft + 'px';
-            if (badge.style.top !== topStr) badge.style.top = topStr;
-            if (badge.style.left !== leftStr) badge.style.left = leftStr;
-            keep.push(badge);
-        }
-
-        document.querySelectorAll('.wa-alt-badge').forEach(function(el) {
-            if (keep.indexOf(el) === -1) el.remove();
-        });
-    };
-
-    // 4. Funcion para ocultar badges
-    window.__waHideAltBadges = function() {
-        document.querySelectorAll('.wa-alt-badge').forEach(function(el) { el.remove(); });
-    };
-
-    // 5. Funcion unificada de seleccion y clic simulado 100% compatible con React 18
-    window.__waSelectChatElement = function(target, preserveSeenState) {
-        if (!target) return;
+    // Seleccion y clic simulado 100% compatible con React 18
+    function selectChatElement(target, preserveSeenState) {
+        if (!target) return false;
 
         var isAlreadySelected = (target.getAttribute && target.getAttribute('aria-selected') === 'true') ||
                                 (target.querySelector && target.querySelector('[aria-selected="true"]') !== null);
@@ -598,11 +456,11 @@
             window.__waScheduleReadOnlyChatCheck();
         }
         return didScroll;
-    };
+    }
 
-    // 6. Obtener el indice del chat seleccionado actualmente
-    window.__waGetCurrentChatIndex = function(includeAllMounted) {
-        var validChats = (window.__waGetValidChats) ? window.__waGetValidChats(!!includeAllMounted) : [];
+    // Obtiene el indice del chat seleccionado actualmente
+    function getCurrentChatIndex(includeAllMounted) {
+        var validChats = getValidChats(!!includeAllMounted);
         if (!validChats.length) return -1;
 
         // 1. Prioridad: atributo aria-selected en la fila o sus hijos
@@ -659,10 +517,10 @@
         }
 
         return -1;
-    };
+    }
 
-    // 7. Navegacion secuencial por chats (+1 abajo, -1 arriba)
-    window.__waNavigateChat = function(offset) {
+    // Navegacion secuencial por chats (+1 abajo, -1 arriba)
+    function navigateChat(offset) {
         var navNow = performance.now();
         var snap = computeValidChatsSnapshot();
         var validChats = snap.all;
@@ -670,10 +528,10 @@
 
         validChatsBatchCache = snap;
         try {
-            var currentIndex = window.__waGetCurrentChatIndex(true);
+            var currentIndex = getCurrentChatIndex(true);
             // Si React aun no comprometio aria-selected del salto anterior (< 300ms),
             // evitar re-seleccionar el mismo chat tomando como base el destino logico previo.
-            if (lastNavTargetEl && lastNavTargetEl.isConnected && (navNow - lastNavAt) < 300) {
+            if (lastNavTargetEl && lastNavTargetEl.isConnected && (navNow - lastNavAt) < NAV_PENDING_COMMIT_MS) {
                 var currentEl = currentIndex >= 0 ? validChats[currentIndex] : null;
                 if (currentEl === lastNavFromEl) {
                     var prevTargetIdx = validChats.indexOf(lastNavTargetEl);
@@ -718,40 +576,32 @@
             lastNavAt = navNow;
 
             var didScroll = false;
-            if (target && window.__waSelectChatElement) {
-                didScroll = !!window.__waSelectChatElement(target);
+            if (target) {
+                didScroll = !!selectChatElement(target);
             }
             if (didScroll) {
                 validChatsBatchCache = null;
             }
 
-            clearNavBadgeTimers();
-            // Evitar llamar __waShowAltBadges() sincronamente justo tras el click (causaba reflow de 95-136ms).
-            // Si la lista no se desplazo, los badges visibles 1..9 no cambiaron de fila; solo refrescar si hubo scroll.
-            if (didScroll && window.__waShowAltBadges && window.__waAltKeyDown) {
-                navBadgeRafId = window.requestAnimationFrame(function() {
-                    navBadgeRafId = null;
-                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
-                        window.__waShowAltBadges();
-                    }
-                });
-                navBadgeTimer1 = setTimeout(function() {
-                    navBadgeTimer1 = null;
-                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
-                        window.__waShowAltBadges();
-                    }
-                }, 140);
-            }
+            notifyListeners(navigateListeners, {
+                fromIndex: currentIndex,
+                targetIndex: targetIndex,
+                target: target || null,
+                didScroll: didScroll
+            });
 
             return targetIndex;
         } finally {
             validChatsBatchCache = null;
         }
-    };
+    }
 
-    // 7b. Busqueda de chat por nombre con scroll progresivo sobre la lista virtualizada de #pane-side
-    window.__waFindChatTimer = null;
-    window.__waFindAndOpenChat = function(targetName, onFoundCallback) {
+    // Busqueda de chat por nombre con scroll progresivo sobre la lista virtualizada de #pane-side
+    if (typeof window.__waFindChatTimer === 'undefined') {
+        window.__waFindChatTimer = null;
+    }
+
+    function findAndOpenChat(targetName, onFoundCallback) {
         if (window.__waFindChatTimer) {
             clearTimeout(window.__waFindChatTimer);
             window.__waFindChatTimer = null;
@@ -778,7 +628,7 @@
         };
 
         var tryFindInDom = function() {
-            var chats = window.__waGetValidChats ? window.__waGetValidChats(true) : [];
+            var chats = getValidChats(true);
             for (var i = 0; i < chats.length; i++) {
                 if (matchRow(chats[i])) {
                     window.__waCurrentChatIndex = i;
@@ -796,7 +646,7 @@
 
         var immediate = tryFindInDom();
         if (immediate) {
-            window.__waSelectChatElement(immediate);
+            selectChatElement(immediate);
             if (typeof onFoundCallback === 'function') {
                 onFoundCallback(immediate);
             }
@@ -838,7 +688,7 @@
             window.__waFindChatTimer = null;
             var hit = tryFindInDom();
             if (hit) {
-                window.__waSelectChatElement(hit);
+                selectChatElement(hit);
                 if (typeof onFoundCallback === 'function') {
                     onFoundCallback(hit);
                 }
@@ -865,197 +715,37 @@
 
         window.__waFindChatTimer = setTimeout(stepSearch, 60);
         return 0;
+    }
+
+    app.chatNavigation = {
+        CHAT_CONTENT_SELECTOR: CHAT_CONTENT_SELECTOR,
+        ROW_VALIDITY_TTL_MS: ROW_VALIDITY_TTL_MS,
+        NAV_PENDING_COMMIT_MS: NAV_PENDING_COMMIT_MS,
+        normalizeChatTitle: normalizeChatTitle,
+        isElementVisible: isElementVisible,
+        extractRowTitle: extractRowTitle,
+        computeValidChatsSnapshot: computeValidChatsSnapshot,
+        getValidChats: getValidChats,
+        selectChatElement: selectChatElement,
+        getCurrentChatIndex: getCurrentChatIndex,
+        navigateChat: navigateChat,
+        findAndOpenChat: findAndOpenChat,
+        ensurePaneListeners: ensurePaneListeners,
+        onPaneReady: onPaneReady,
+        offPaneReady: offPaneReady,
+        onPaneScroll: onPaneScroll,
+        offPaneScroll: offPaneScroll,
+        onNavigate: onNavigate,
+        offNavigate: offNavigate
     };
 
-    // 8. Escuchadores directos de teclado y badges dentro de la ventana web
-    // Nota: Alt + Wheel se intercepta de forma nativa en C++ (whatsapp_window.cpp);
-    // no registrar listeners wheel { passive: false } en JS para preservar el scroll GPU compositor.
-    if (!window.__waAltListenersAttached) {
-        window.__waAltListenersAttached = true;
-        window.__waAltKeyDown = false;
+    // Contratos publicos consumidos por whatsapp_chat_bridge.cpp, read_receipt_blocker.js y bootstrap.js
+    window.__waGetValidChats = getValidChats;
+    window.__waSelectChatElement = selectChatElement;
+    window.__waGetCurrentChatIndex = getCurrentChatIndex;
+    window.__waNavigateChat = navigateChat;
+    window.__waFindAndOpenChat = findAndOpenChat;
+    window.__waEnsurePaneListeners = ensurePaneListeners;
 
-        var observedBadgePane = null;
-        var BADGE_OBSERVER_OPTS = {
-            childList: true,
-            subtree: true,
-            attributes: true,
-            attributeFilter: ['style', 'data-wa-compact-hide']
-        };
-
-        var ensurePaneBadgeObserver = function(pane) {
-            if (!pane || pane.__waBadgeObserver || !window.MutationObserver) return;
-            var isBadgeNode = function(node) {
-                return node && node.nodeType === 1 && node.classList && node.classList.contains('wa-alt-badge');
-            };
-            var isOnlyBadgeMutation = function(m) {
-                if (m.type === 'attributes') {
-                    return isBadgeNode(m.target);
-                }
-                if (m.type === 'characterData') {
-                    return isBadgeNode(m.target && m.target.parentNode);
-                }
-                if (m.type === 'childList') {
-                    if (isBadgeNode(m.target)) {
-                        return true;
-                    }
-                    for (var a = 0; a < m.addedNodes.length; a++) {
-                        if (!isBadgeNode(m.addedNodes[a])) {
-                            return false;
-                        }
-                    }
-                    for (var r = 0; r < m.removedNodes.length; r++) {
-                        if (!isBadgeNode(m.removedNodes[r])) {
-                            return false;
-                        }
-                    }
-                    return true;
-                }
-                return false;
-            };
-            pane.__waBadgeObserver = new MutationObserver(function(mutations) {
-                if (!window.__waAltKeyDown) return;
-                var hasRelevant = false;
-                for (var i = 0; i < mutations.length; i++) {
-                    if (!isOnlyBadgeMutation(mutations[i])) {
-                        hasRelevant = true;
-                        break;
-                    }
-                }
-                if (!hasRelevant || pane.__waBadgeMutRaf) return;
-                pane.__waBadgeMutRaf = true;
-                window.requestAnimationFrame(function() {
-                    pane.__waBadgeMutRaf = false;
-                    if (window.__waAltKeyDown && window.__waShowAltBadges) {
-                        window.__waShowAltBadges();
-                    }
-                });
-            });
-            pane.__waBadgeObserverConnected = false;
-        };
-
-        var syncBadgeObserver = function(shouldObserve) {
-            if (!shouldObserve) {
-                clearNavBadgeTimers();
-                if (observedBadgePane && observedBadgePane.__waBadgeObserver && observedBadgePane.__waBadgeObserverConnected) {
-                    observedBadgePane.__waBadgeObserver.disconnect();
-                    observedBadgePane.__waBadgeObserverConnected = false;
-                    observedBadgePane.__waBadgeMutRaf = false;
-                }
-                var curPaneOff = document.getElementById('pane-side');
-                if (curPaneOff && curPaneOff !== observedBadgePane && curPaneOff.__waBadgeObserver && curPaneOff.__waBadgeObserverConnected) {
-                    curPaneOff.__waBadgeObserver.disconnect();
-                    curPaneOff.__waBadgeObserverConnected = false;
-                    curPaneOff.__waBadgeMutRaf = false;
-                }
-                observedBadgePane = null;
-                return;
-            }
-
-            var pane = document.getElementById('pane-side');
-            if (!pane) return;
-            if (observedBadgePane && observedBadgePane !== pane && observedBadgePane.__waBadgeObserver && observedBadgePane.__waBadgeObserverConnected) {
-                observedBadgePane.__waBadgeObserver.disconnect();
-                observedBadgePane.__waBadgeObserverConnected = false;
-                observedBadgePane.__waBadgeMutRaf = false;
-            }
-            ensurePaneBadgeObserver(pane);
-            if (pane.__waBadgeObserver && !pane.__waBadgeObserverConnected) {
-                pane.__waBadgeObserver.observe(pane, BADGE_OBSERVER_OPTS);
-                pane.__waBadgeObserverConnected = true;
-                observedBadgePane = pane;
-            }
-        };
-        window.__waSyncBadgeObserver = syncBadgeObserver;
-
-        if (typeof window.__waShowAltBadges === 'function' && !window.__waShowAltBadges.__waObsWrapped) {
-            var origShowAltBadges = window.__waShowAltBadges;
-            var wrappedShowAltBadges = function() {
-                var result = origShowAltBadges.apply(this, arguments);
-                if (window.__waAltKeyDown) {
-                    syncBadgeObserver(true);
-                }
-                return result;
-            };
-            wrappedShowAltBadges.__waObsWrapped = true;
-            window.__waShowAltBadges = wrappedShowAltBadges;
-        }
-        if (typeof window.__waHideAltBadges === 'function' && !window.__waHideAltBadges.__waObsWrapped) {
-            var origHideAltBadges = window.__waHideAltBadges;
-            var wrappedHideAltBadges = function() {
-                syncBadgeObserver(false);
-                return origHideAltBadges.apply(this, arguments);
-            };
-            wrappedHideAltBadges.__waObsWrapped = true;
-            window.__waHideAltBadges = wrappedHideAltBadges;
-        }
-
-        window.__waEnsurePaneListeners = function() {
-            var pane = document.getElementById('pane-side');
-            if (!pane) return;
-            if (!pane.__waScrollBadgeAttached) {
-                pane.__waScrollBadgeAttached = true;
-                var badgeRaf = false;
-                pane.addEventListener('scroll', function() {
-                    if (!window.__waAltKeyDown || badgeRaf) return;
-                    badgeRaf = true;
-                    window.requestAnimationFrame(function() {
-                        badgeRaf = false;
-                        if (window.__waAltKeyDown && window.__waShowAltBadges) {
-                            window.__waShowAltBadges();
-                        }
-                    });
-                }, { passive: true });
-            }
-            ensurePaneBadgeObserver(pane);
-            if (window.__waAltKeyDown) {
-                syncBadgeObserver(true);
-            }
-        };
-
-        window.addEventListener('keydown', function(e) {
-            var isAltGrEvent = e.key === 'AltGraph' ||
-                               e.key === 'ISO_Level3_Shift' ||
-                               e.code === 'AltRight' ||
-                               e.location === 2 ||
-                               (e.getModifierState && e.getModifierState('AltGraph'));
-            if (isAltGrEvent) {
-                if (window.__waAltKeyDown) {
-                    window.__waAltKeyDown = false;
-                    syncBadgeObserver(false);
-                    window.__waHideAltBadges();
-                }
-                return;
-            }
-            if (e.key === 'Alt' &&
-                e.code !== 'AltRight' &&
-                e.location !== 2 &&
-                !(e.getModifierState && e.getModifierState('AltGraph'))) {
-                // Solo se marca el estado y se activa el observer mientras Alt este pulsado:
-                // C++ (eventFilter) es el unico que muestra los badges.
-                window.__waAltKeyDown = true;
-                syncBadgeObserver(true);
-            }
-        }, true);
-
-        window.addEventListener('keyup', function(e) {
-            if (e.key === 'Alt' || e.key === 'AltGraph' || e.code === 'AltRight') {
-                window.__waAltKeyDown = false;
-                syncBadgeObserver(false);
-                window.__waHideAltBadges();
-            }
-        }, true);
-
-        window.addEventListener('blur', function() {
-            if (window.__waAltKeyDown) {
-                window.__waAltKeyDown = false;
-                syncBadgeObserver(false);
-                if (window.__waHideAltBadges) {
-                    window.__waHideAltBadges();
-                }
-            }
-        });
-    }
-    if (window.__waEnsurePaneListeners) {
-        window.__waEnsurePaneListeners();
-    }
+    ensurePaneListeners();
 })();

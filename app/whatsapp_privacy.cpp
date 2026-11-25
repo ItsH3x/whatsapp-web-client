@@ -1,4 +1,5 @@
 #include "whatsapp_window.h"
+#include "privacy_dialogs.h"
 
 #include <QApplication>
 #include <QColor>

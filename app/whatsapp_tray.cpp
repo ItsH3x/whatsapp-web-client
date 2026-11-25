@@ -13,6 +13,8 @@ void WhatsAppClient::handleNotification(std::unique_ptr<QWebEngineNotification> 
         return;
     }
 
+    notification->show();
+
     bool isLocked = (m_lockOverlay && m_lockOverlay->isLocked());
     QString title = notification->title();
     QString body;
@@ -33,6 +35,7 @@ void WhatsAppClient::handleNotification(std::unique_ptr<QWebEngineNotification> 
                 safeTitle.append(c);
             }
         }
+        safeTitle = safeTitle.trimmed();
         if (safeTitle.isEmpty()) {
             safeTitle = "notification_icon";
         }

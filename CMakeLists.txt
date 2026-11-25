@@ -40,6 +40,7 @@ add_executable(whatsapp-web-client
     app/config_manager.cpp
     app/notification_manager.cpp
     app/lock_overlay.cpp
+    app/privacy_dialogs.cpp
     app/whatsapp_page.cpp
     app/whatsapp_window.cpp
     app/whatsapp_tray.cpp

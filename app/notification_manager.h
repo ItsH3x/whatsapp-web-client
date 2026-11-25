@@ -24,6 +24,7 @@ signals:
 private slots:
     void onNotificationReplied(uint id, const QString &text);
     void onActionInvoked(uint id, const QString &action);
+    void onNotificationClosed(uint id, uint reason);
 
 private:
     QHash<QString, uint> m_chatToId;
