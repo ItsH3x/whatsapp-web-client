@@ -1455,7 +1455,16 @@
             dl.style.setProperty('box-sizing', 'border-box', 'important');
         }
 
+        function hasVisibleUiContent(el) {
+            if (!el || !el.isConnected) return false;
+            if (el.querySelector('header, section, h1, h2, h3, img, svg, canvas, video, button, [role="button"], input, [role="textbox"], [data-testid="empty-state-drawer"], [data-animate-drawer-left="true"], [data-animate-drawer-right="true"]') !== null) {
+                return true;
+            }
+            return (el.innerText || '').trim().length > 0;
+        }
+
         var activeTabShell = false;
+        var tabShellHasRightUi = false;
         var tabShells = container.querySelectorAll('[data-wa-tab-shell="true"]');
         for (var tsIdx = 0; tsIdx < tabShells.length; tsIdx++) {
             var tsEl = tabShells[tsIdx];
@@ -1464,7 +1473,10 @@
             var tsCs = window.getComputedStyle(tsEl);
             if (tsRect.width > 0 && tsRect.height > 0 && tsCs.display !== 'none' && tsCs.visibility !== 'hidden') {
                 activeTabShell = true;
-                break;
+                var tsRightCol = tsEl.querySelector(':scope > [data-wa-main-column="true"], :scope > [data-testid="drawer-middle"]');
+                if (tsRightCol && hasVisibleUiContent(tsRightCol)) {
+                    tabShellHasRightUi = true;
+                }
             }
         }
         if (!activeTabShell && !side) {
@@ -1476,6 +1488,14 @@
                 }
             }
         }
+
+        var tabShellMainLive = !!(
+            activeTabShell &&
+            !tabShellHasRightUi &&
+            mainEl &&
+            mainEl.isConnected &&
+            !mainEl.closest('[data-wa-tab-shell="true"]')
+        );
 
         var activeLeftDrawer = false;
         var activeLeftDrawers = container.querySelectorAll('[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"])');
@@ -1491,12 +1511,18 @@
         }
 
         var wasTabShellActive = !!(document.body && document.body.classList.contains('wa-tab-shell-active'));
+        var wasTabShellMainLive = !!(document.body && document.body.classList.contains('wa-tab-shell-main-live'));
         var wasLeftDrawerActive = !!(document.body && document.body.classList.contains('wa-left-drawer-active'));
         if (document.body) {
             if (activeTabShell) {
                 document.body.classList.add('wa-tab-shell-active');
             } else {
                 document.body.classList.remove('wa-tab-shell-active');
+            }
+            if (tabShellMainLive) {
+                document.body.classList.add('wa-tab-shell-main-live');
+            } else {
+                document.body.classList.remove('wa-tab-shell-main-live');
             }
             if (activeLeftDrawer) {
                 document.body.classList.add('wa-left-drawer-active');
@@ -1508,25 +1534,39 @@
         var sideCoveredByTabShellHost = false;
         for (var ci = 0; ci < children.length; ci++) {
             var cChild = children[ci];
-            var isChatUnderlying = (side && (cChild === side || cChild.contains(side))) ||
-                                   (mainEl && (cChild === mainEl || cChild.contains(mainEl))) ||
-                                   (sideCol && cChild === sideCol && !cChild.hasAttribute('data-wa-tab-side-column')) ||
-                                   (mainCol && cChild === mainCol && !cChild.hasAttribute('data-wa-tab-shell') && !cChild.closest('[data-wa-tab-shell="true"]'));
+            var isChatSideUnderlying = (side && (cChild === side || cChild.contains(side))) ||
+                                       (sideCol && cChild === sideCol && !cChild.hasAttribute('data-wa-tab-side-column'));
+            var isChatMainUnderlying = (mainEl && (cChild === mainEl || cChild.contains(mainEl))) ||
+                                       (mainCol && cChild === mainCol && !cChild.hasAttribute('data-wa-tab-shell') && !cChild.closest('[data-wa-tab-shell="true"]'));
+            var isChatUnderlying = isChatSideUnderlying || isChatMainUnderlying;
             if (!isChatUnderlying) {
                 if (cChild.hasAttribute('data-wa-chat-bg-hidden')) {
                     cChild.removeAttribute('data-wa-chat-bg-hidden');
                 }
+                if (cChild.hasAttribute('data-wa-tab-main-live')) {
+                    cChild.removeAttribute('data-wa-tab-main-live');
+                }
                 continue;
             }
             var hostsTabShell = cChild.hasAttribute('data-wa-tab-shell') || !!cChild.querySelector('[data-wa-tab-shell="true"]');
-            if (activeTabShell && !hostsTabShell) {
-                cChild.setAttribute('data-wa-chat-bg-hidden', 'true');
-            } else {
-                if (hostsTabShell && side && (cChild === side || cChild.contains(side))) {
-                    sideCoveredByTabShellHost = true;
-                }
+            if (tabShellMainLive && isChatMainUnderlying && !isChatSideUnderlying && !hostsTabShell) {
                 if (cChild.hasAttribute('data-wa-chat-bg-hidden')) {
                     cChild.removeAttribute('data-wa-chat-bg-hidden');
+                }
+                cChild.setAttribute('data-wa-tab-main-live', 'true');
+            } else {
+                if (cChild.hasAttribute('data-wa-tab-main-live')) {
+                    cChild.removeAttribute('data-wa-tab-main-live');
+                }
+                if (activeTabShell && !hostsTabShell) {
+                    cChild.setAttribute('data-wa-chat-bg-hidden', 'true');
+                } else {
+                    if (hostsTabShell && side && (cChild === side || cChild.contains(side))) {
+                        sideCoveredByTabShellHost = true;
+                    }
+                    if (cChild.hasAttribute('data-wa-chat-bg-hidden')) {
+                        cChild.removeAttribute('data-wa-chat-bg-hidden');
+                    }
                 }
             }
         }
@@ -1543,14 +1583,16 @@
         var syncResult = {
             hasRightCol: hasRightCol,
             activeTabShell: activeTabShell,
+            tabShellMainLive: tabShellMainLive,
             activeLeftDrawer: activeLeftDrawer,
-            tabShellChanged: wasTabShellActive !== activeTabShell,
+            tabShellChanged: wasTabShellActive !== activeTabShell || wasTabShellMainLive !== tabShellMainLive,
             leftDrawerChanged: wasLeftDrawerActive !== activeLeftDrawer
         };
         emitLayoutChange({
             type: 'aux-drawers',
             hasRightCol: syncResult.hasRightCol,
             activeTabShell: syncResult.activeTabShell,
+            tabShellMainLive: syncResult.tabShellMainLive,
             activeLeftDrawer: syncResult.activeLeftDrawer,
             tabShellChanged: syncResult.tabShellChanged,
             leftDrawerChanged: syncResult.leftDrawerChanged

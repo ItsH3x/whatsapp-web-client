@@ -280,13 +280,18 @@
             } else if (inMainCol) {
                 dirtyMainChanged = true;
                 dirtyTheme = true;
+                if (tabShellEl) {
+                    dirtyLayout = true;
+                }
                 if (isOpeningPickerNow) {
                     dirtyOverlay = true;
                 }
             } else if (inSide) {
                 dirtySideNav = true;
             } else if (inTabShell) {
-                if (tgt === tabShellEl || !tabShellEl.querySelector('[data-wa-tab-side-column="true"]')) {
+                if (tgt === tabShellEl ||
+                    !tabShellEl.querySelector('[data-wa-tab-side-column="true"]') ||
+                    (tgt.closest && tgt.closest('[data-testid="drawer-middle"]'))) {
                     dirtyLayout = true;
                 }
             } else if (inRightCol) {
@@ -314,7 +319,7 @@
                     if (added.id === 'main') {
                         dirtyMainChanged = true;
                         dirtyTheme = true;
-                        if (!mainColEl) dirtyLayout = true;
+                        if (!mainColEl || tabShellEl) dirtyLayout = true;
                     } else if (added.id === 'side' || added.id === 'pane-side') {
                         dirtyLayout = true;
                         dirtySideNav = true;
@@ -322,7 +327,7 @@
                     } else if (!inPaneSide && added.querySelector && added.querySelector('#main')) {
                         dirtyMainChanged = true;
                         dirtyTheme = true;
-                        if (!mainColEl) dirtyLayout = true;
+                        if (!mainColEl || tabShellEl) dirtyLayout = true;
                     }
 
                     if (isOpeningPickerNow ||
@@ -354,6 +359,7 @@
                     }
                     if (!dirtyLayout && !inPaneSide && !inMain &&
                         (rem.id === 'side' ||
+                         (rem.id === 'main' && tabShellEl) ||
                          (rem.getAttribute && (rem.getAttribute('data-wa-tab-shell') === 'true' ||
                                                rem.getAttribute('data-wa-tab-side-column') === 'true' ||
                                                rem.getAttribute('data-wa-right-column') === 'true' ||

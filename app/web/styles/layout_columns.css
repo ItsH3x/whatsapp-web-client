@@ -203,13 +203,16 @@ body:not(.wa-sidebar-compact) [data-wa-side-column="true"] > div > header {
 
 /* Cuando una pestana no-Chat (Estados, Canales, Comunidades, Configuracion, Perfil)
    esta activa, ocultar las columnas subyacentes de Chats para que el Tab Shell
-   arranque a 0px del rail izquierdo sin gap transparente */
+   arranque a 0px del rail izquierdo sin gap transparente.
+   Excepcion (.wa-tab-shell-main-live): en Canales/Comunidades WhatsApp monta la
+   conversacion seleccionada en #main (mainCol) y vacia drawer-middle; en ese estado
+   se mantiene #side oculto pero mainCol queda visible alineado tras la columna lateral. */
 body.wa-tab-shell-active [data-wa-chat-bg-hidden="true"],
 body.wa-tab-shell-active [data-wa-flex-container="true"] > [data-wa-side-column="true"]:not([data-wa-tab-side-column="true"]):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])),
 body.wa-tab-shell-active .two > div:has(#side):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])),
 body.wa-tab-shell-active .three > div:has(#side):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])),
-body.wa-tab-shell-active .two > div:has(#main):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])),
-body.wa-tab-shell-active .three > div:has(#main):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])) {
+body.wa-tab-shell-active:not(.wa-tab-shell-main-live) .two > div:has(#main):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])),
+body.wa-tab-shell-active:not(.wa-tab-shell-main-live) .three > div:has(#main):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])) {
     display: none !important;
     width: 0px !important;
     min-width: 0px !important;
@@ -219,6 +222,16 @@ body.wa-tab-shell-active .three > div:has(#main):not([data-wa-tab-shell="true"])
     border: none !important;
     box-shadow: none !important;
     overflow: hidden !important;
+    pointer-events: none !important;
+}
+
+body.wa-tab-shell-active.wa-tab-shell-main-live [data-wa-tab-main-live="true"] {
+    margin-left: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    margin-inline-start: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+}
+
+body.wa-tab-shell-active.wa-tab-shell-main-live [data-wa-tab-shell="true"] > [data-wa-main-column="true"],
+body.wa-tab-shell-active.wa-tab-shell-main-live [data-wa-tab-shell="true"] > [data-testid="drawer-middle"] {
     pointer-events: none !important;
 }
 
