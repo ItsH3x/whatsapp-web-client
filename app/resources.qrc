@@ -2,7 +2,10 @@
     <qresource prefix="/web">
         <file alias="chat_helpers.js">web/chat_helpers.js</file>
         <file alias="read_receipt_blocker.js">web/read_receipt_blocker.js</file>
-        <file alias="sidebar_enhancements.css">web/sidebar_enhancements.css</file>
+        <file alias="styles/theme_accents.css">web/styles/theme_accents.css</file>
+        <file alias="styles/layout_columns.css">web/styles/layout_columns.css</file>
+        <file alias="styles/resizers_overlays.css">web/styles/resizers_overlays.css</file>
+        <file alias="styles/compact_mode.css">web/styles/compact_mode.css</file>
         <file alias="sidebar_enhancements.js">web/sidebar_enhancements.js</file>
     </qresource>
 </RCC>

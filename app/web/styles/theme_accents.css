@@ -1,0 +1,109 @@
+/* Modulo CSS 1/4: theme_accents.css
+ * Responsabilidad: variables de acento dinamico (--wa-dynamic-accent*), remapeo de tokens
+ * WDS/nativos de WhatsApp Web, override de contraste de primer plano y utilidades [data-wa-accent-*].
+ * Dependencias: ninguna (base de la cascada CSS).
+ */
+
+:root {
+    --wa-dynamic-accent: #00a884;
+    --wa-dynamic-accent-rgb: 0, 168, 132;
+    --wa-dynamic-accent-light: #d9fdd3;
+    --wa-dynamic-accent-light-rgb: 217, 253, 211;
+    --wa-dynamic-accent-dark: #0a332c;
+    --wa-dynamic-accent-dark-rgb: 10, 51, 44;
+    --wa-dynamic-accent-border: #008069;
+    --wa-dynamic-accent-border-rgb: 0, 128, 105;
+    --wa-dynamic-accent-fg: #111b21;
+    --wa-dynamic-accent-tint: rgba(0, 168, 132, 0.22);
+}
+
+:root,
+body,
+#app,
+#app > div {
+    --WDS-accent: var(--wa-dynamic-accent, #00a884) !important;
+    --WDS-accent-RGB: var(--wa-dynamic-accent-rgb, 0, 168, 132) !important;
+    --WDS-systems-accent: var(--wa-dynamic-accent, #00a884) !important;
+    --WDS-systems-accent-RGB: var(--wa-dynamic-accent-rgb, 0, 168, 132) !important;
+    --WDS-persistent-activity-indicator: var(--wa-dynamic-accent, #00a884) !important;
+    --WDS-persistent-activity-indicator-RGB: var(--wa-dynamic-accent-rgb, 0, 168, 132) !important;
+    --unread-marker-background: var(--wa-dynamic-accent, #00a884) !important;
+    --unread-marker-background-rgb: var(--wa-dynamic-accent-rgb, 0, 168, 132) !important;
+    --button-primary-background: var(--wa-dynamic-accent, #00a884) !important;
+    --button-primary-background-rgb: var(--wa-dynamic-accent-rgb, 0, 168, 132) !important;
+    --active-tab-marker: var(--wa-dynamic-accent, #00a884) !important;
+    --active-tab-marker-rgb: var(--wa-dynamic-accent-rgb, 0, 168, 132) !important;
+    --teal: var(--wa-dynamic-accent, #00a884) !important;
+    --teal-rgb: var(--wa-dynamic-accent-rgb, 0, 168, 132) !important;
+    --teal-light: var(--wa-dynamic-accent-light, #d9fdd3) !important;
+    --teal-light-rgb: var(--wa-dynamic-accent-light-rgb, 217, 253, 211) !important;
+    --ptt-green: var(--wa-dynamic-accent, #00a884) !important;
+    --ptt-green-rgb: var(--wa-dynamic-accent-rgb, 0, 168, 132) !important;
+    --highlight: var(--wa-dynamic-accent, #00a884) !important;
+    --highlight-rgb: var(--wa-dynamic-accent-rgb, 0, 168, 132) !important;
+    --mention-at-text: var(--wa-dynamic-accent, #00a884) !important;
+}
+
+html[data-wa-accent-fg-override="true"],
+html[data-wa-accent-fg-override="true"] body,
+html[data-wa-accent-fg-override="true"] #app,
+html[data-wa-accent-fg-override="true"] #app > div {
+    --unread-marker-text: var(--wa-dynamic-accent-fg, #111b21) !important;
+    --WDS-content-on-accent: var(--wa-dynamic-accent-fg, #111b21) !important;
+    --WDS-systems-on-accent: var(--wa-dynamic-accent-fg, #111b21) !important;
+    --button-primary: var(--wa-dynamic-accent-fg, #111b21) !important;
+}
+
+body .wa-alt-badge,
+body [data-wa-accent-bg="true"] {
+    background-color: var(--wa-dynamic-accent, #00a884) !important;
+    border: none !important;
+    outline: none !important;
+}
+
+body .wa-alt-badge {
+    color: var(--wa-dynamic-accent-fg, #111b21) !important;
+}
+
+body [data-wa-accent-bg-light="true"] {
+    background-color: var(--wa-dynamic-accent-light, #d9fdd3) !important;
+}
+
+body [data-wa-accent-pill="true"] {
+    background-color: var(--wa-dynamic-accent-dark, var(--wa-dynamic-accent-tint, rgba(0, 168, 132, 0.22))) !important;
+    color: var(--wa-dynamic-accent-light, var(--wa-dynamic-accent, #00a884)) !important;
+}
+
+body [data-wa-accent-pill="true"] * {
+    color: var(--wa-dynamic-accent-light, var(--wa-dynamic-accent, #00a884)) !important;
+}
+
+body [data-wa-accent-fg="true"] {
+    color: var(--wa-dynamic-accent, #00a884) !important;
+}
+
+body [data-wa-accent-fg-light="true"] {
+    color: var(--wa-dynamic-accent-light, #d9fdd3) !important;
+}
+
+body [data-wa-accent-fg-dark="true"] {
+    color: var(--wa-dynamic-accent-border, #008069) !important;
+}
+
+body [data-wa-accent-border="true"] {
+    border-color: var(--wa-dynamic-accent-border, var(--wa-dynamic-accent, #00a884)) !important;
+}
+
+body [data-wa-accent-icon="true"],
+body [data-wa-accent-icon="true"] svg,
+body [data-wa-accent-icon="true"] path {
+    color: var(--wa-dynamic-accent, #00a884) !important;
+    fill: var(--wa-dynamic-accent, #00a884) !important;
+}
+
+body [data-wa-accent-stroke="true"],
+body [data-wa-accent-stroke="true"] svg,
+body [data-wa-accent-stroke="true"] path,
+body [data-wa-accent-stroke="true"] circle {
+    stroke: var(--wa-dynamic-accent, #00a884) !important;
+}

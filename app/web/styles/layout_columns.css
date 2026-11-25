@@ -1,0 +1,405 @@
+/* Modulo CSS 2/4: layout_columns.css
+ * Responsabilidad: reseteo full-viewport, geometria de columnas (#side, #main, panel derecho),
+ * Tab Shell multi-pestana, drawers izquierdos, escalado adaptativo (#main.wa-main-scaled y P10),
+ * host nativo de bordes del rail (CH[2] / drawer-middle), rail de navegacion y limpieza de capas auxiliares vacias.
+ * Dependencias: ninguna en CSS; respeta contratos de estado body.wa-sidebar-compact,
+ * body.wa-tab-shell-active y html.wa-resizing-active.
+ */
+
+:root {
+    --wa-sidebar-width: 360px;
+    --wa-tab-sidebar-width: 360px;
+    --wa-right-panel-width: 340px;
+}
+
+/* Reseteo full-viewport y supresion de linea blanca superior */
+html,
+body {
+    margin: 0 !important;
+    padding: 0 !important;
+    overflow: hidden !important;
+    overflow-x: clip !important;
+    background-color: var(--background-default, #111b21) !important;
+    border: none !important;
+}
+
+div.app-wrapper-web,
+.app-wrapper-web,
+[data-wa-flex-container="true"] {
+    top: 0 !important;
+    left: 0 !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    max-width: 100vw !important;
+    max-height: 100vh !important;
+    margin: 0 !important;
+    padding: 0 !important;
+    border: none !important;
+    border-radius: 0 !important;
+    box-shadow: none !important;
+    transform: none !important;
+    overflow-x: clip !important;
+}
+
+body::before,
+body::after,
+#app::before,
+#app::after,
+.app-wrapper-web::before,
+.app-wrapper-web::after {
+    display: none !important;
+    content: none !important;
+    height: 0 !important;
+    border: none !important;
+}
+
+.two,
+.three,
+#main,
+#main header,
+#side header,
+[data-wa-main-column="true"] {
+    border-top: none !important;
+    border-top-width: 0 !important;
+    box-shadow: none !important;
+}
+
+#side,
+[data-wa-side-column="true"] {
+    border-top: none !important;
+    border-top-width: 0 !important;
+}
+
+#main header::before,
+#main header::after {
+    border-top: none !important;
+    box-shadow: none !important;
+}
+
+/* 1. Columna Lateral (#side) y su wrapper */
+#side,
+[data-wa-side-column="true"],
+.two > div:has(> #side),
+.three > div:has(> #side),
+.two > div:has(#side),
+.three > div:has(#side) {
+    width: var(--wa-sidebar-width) !important;
+    min-width: var(--wa-sidebar-width) !important;
+    max-width: var(--wa-sidebar-width) !important;
+    flex: 0 0 var(--wa-sidebar-width) !important;
+    flex-basis: var(--wa-sidebar-width) !important;
+    flex-grow: 0 !important;
+    flex-shrink: 0 !important;
+    box-sizing: border-box !important;
+    position: relative !important;
+    z-index: 1 !important;
+}
+
+[data-wa-side-column="true"] #side,
+[data-wa-side-column="true"] > div,
+.two > div:has(#side) #side,
+.two > div:has(#side) > div,
+.three > div:has(#side) #side,
+.three > div:has(#side) > div {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow-x: clip !important;
+    flex: 1 1 auto !important;
+}
+
+body:not(.wa-sidebar-compact) #side header,
+body:not(.wa-sidebar-compact) [data-wa-side-column="true"] > header,
+body:not(.wa-sidebar-compact) [data-wa-side-column="true"] > div > header {
+    overflow: visible !important;
+    flex: 0 0 auto !important;
+    flex-shrink: 0 !important;
+}
+
+/* 2. Columna de Conversacion (#main): SOLO el contenedor inmediato adyacente */
+#main,
+[data-wa-main-column="true"],
+[data-wa-side-column="true"] + div,
+.two > div:has(> #main),
+.three > div:has(> #main),
+.two > div:has(#main),
+.three > div:has(#main),
+.two > div:has(#side) + div,
+.three > div:has(#side) + div {
+    flex: 1 1 0% !important;
+    flex-grow: 1 !important;
+    flex-shrink: 1 !important;
+    min-width: 0 !important;
+    width: auto !important;
+    max-width: none !important;
+    box-sizing: border-box !important;
+}
+
+[data-wa-main-column="true"] > #main,
+.two > div:has(#main) > #main,
+.three > div:has(#main) > #main {
+    width: 100% !important;
+    height: 100% !important;
+    min-width: 0 !important;
+    flex: 1 1 auto !important;
+}
+
+#main > div,
+#main [data-testid="conversation-panel-wrapper"] {
+    max-width: 100% !important;
+    width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+/* Escalado adaptativo de #main cuando se comprime bajo el umbral legible */
+#main.wa-main-scaled {
+    zoom: var(--wa-main-scale, 1) !important;
+    overflow: hidden !important;
+}
+
+/* 3. Neutralizacion de paneles auxiliares cerrados (.two, .three y contenedor flex),
+      uniformizacion de drawers izquierdos y configuracion de columna derecha */
+.two > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty,
+.three > div:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty,
+[data-wa-flex-container="true"] > *:not([data-wa-side-column="true"]):not([data-wa-main-column="true"]):not(:has(#side)):not(:has(#main)):empty {
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    flex: 0 0 0px !important;
+    border: none !important;
+    display: none !important;
+}
+
+[data-wa-tab-shell="true"] {
+    flex: 1 1 0% !important;
+    min-width: 0 !important;
+    max-width: none !important;
+    padding-left: 0 !important;
+    padding-inline-start: 0 !important;
+    margin-left: 0 !important;
+    margin-inline-start: 0 !important;
+    box-sizing: border-box !important;
+}
+
+[data-wa-tab-shell="true"]::before,
+[data-wa-tab-shell="true"]::after {
+    display: none !important;
+    content: none !important;
+    width: 0 !important;
+}
+
+[data-wa-tab-spacer="true"] {
+    display: none !important;
+    width: 0px !important;
+    min-width: 0px !important;
+    max-width: 0px !important;
+    flex: 0 0 0px !important;
+    flex-basis: 0px !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+}
+
+/* Cuando una pestana no-Chat (Estados, Canales, Comunidades, Configuracion, Perfil)
+   esta activa, ocultar las columnas subyacentes de Chats para que el Tab Shell
+   arranque a 0px del rail izquierdo sin gap transparente */
+body.wa-tab-shell-active [data-wa-chat-bg-hidden="true"],
+body.wa-tab-shell-active [data-wa-flex-container="true"] > [data-wa-side-column="true"]:not([data-wa-tab-side-column="true"]):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])),
+body.wa-tab-shell-active .two > div:has(#side):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])),
+body.wa-tab-shell-active .three > div:has(#side):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])),
+body.wa-tab-shell-active .two > div:has(#main):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])),
+body.wa-tab-shell-active .three > div:has(#main):not([data-wa-tab-shell="true"]):not(:has([data-wa-tab-shell="true"])) {
+    display: none !important;
+    width: 0px !important;
+    min-width: 0px !important;
+    max-width: 0px !important;
+    flex: 0 0 0px !important;
+    flex-basis: 0px !important;
+    border: none !important;
+    box-shadow: none !important;
+    overflow: hidden !important;
+    pointer-events: none !important;
+}
+
+[data-wa-tab-side-column="true"] {
+    width: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    min-width: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    max-width: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    flex: 0 0 var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    flex-basis: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    margin-left: 0 !important;
+    margin-inline-start: 0 !important;
+    overflow: hidden !important;
+    box-sizing: border-box !important;
+    border-right: 1px solid var(--border-list, rgba(134, 150, 160, 0.22)) !important;
+}
+
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) {
+    width: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    min-width: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    max-width: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    flex: 0 0 var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    flex-basis: var(--wa-tab-sidebar-width, var(--wa-sidebar-width, 360px)) !important;
+    overflow: hidden !important;
+    box-sizing: border-box !important;
+    background-color: var(--panel-background-deep, var(--background-default, #111b21)) !important;
+    border-right: 1px solid rgba(134, 150, 160, 0.22) !important;
+}
+
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) > div,
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) > span,
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) section,
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) header,
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) > span:has([data-animate-drawer-left="true"]),
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]),
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) > div,
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) section,
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) header,
+#side [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]),
+#side [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) > div,
+[data-wa-side-column="true"] [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]),
+[data-wa-side-column="true"] [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) > div,
+[data-wa-side-column="true"] [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) section,
+[data-wa-side-column="true"] [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) header,
+[data-wa-side-column="true"] > span:has([data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"])),
+[data-wa-side-column="true"] div:has(> [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"])),
+[data-wa-tab-side-column="true"] [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]),
+[data-wa-tab-side-column="true"] [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) > div,
+.two > div:has(#side) [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]),
+.three > div:has(#side) [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow-x: clip !important;
+}
+
+[data-wa-left-drawer="true"]:not([data-wa-tab-shell="true"]) [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]),
+#side [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]),
+[data-wa-side-column="true"] [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]),
+[data-wa-tab-side-column="true"] [data-animate-drawer-left="true"]:not([data-wa-tab-shell="true"]) {
+    overflow: hidden !important;
+    background-color: var(--panel-background-deep, var(--background-default, #111b21)) !important;
+}
+
+[data-wa-p10-grid="true"] {
+    box-sizing: border-box !important;
+    max-width: 100% !important;
+    justify-content: center !important;
+}
+
+[data-wa-p10-scaled="true"] {
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+}
+
+[data-wa-right-column="true"] {
+    width: var(--wa-right-panel-width) !important;
+    min-width: var(--wa-right-panel-width) !important;
+    max-width: var(--wa-right-panel-width) !important;
+    flex: 0 0 var(--wa-right-panel-width) !important;
+    flex-basis: var(--wa-right-panel-width) !important;
+    border-left: 1px solid rgba(134, 150, 160, 0.22) !important;
+    box-sizing: border-box !important;
+    overflow-x: clip !important;
+    position: relative !important;
+}
+
+[data-wa-right-column="true"] > div,
+[data-wa-right-column="true"] > span:has([data-animate-drawer-right="true"]),
+[data-wa-right-column="true"] [data-animate-drawer-right="true"],
+[data-wa-right-column="true"] [data-animate-drawer-right="true"] > div,
+[data-wa-right-column="true"] header,
+[data-wa-right-column="true"] section {
+    width: 100% !important;
+    min-width: 0 !important;
+    max-width: 100% !important;
+    box-sizing: border-box !important;
+    overflow-x: clip !important;
+}
+
+/* Fallback: solo dibujar border-right artificial si el host nativo de bordes (CH[2]) no esta presente */
+body:not(.wa-sidebar-compact) [data-wa-flex-container="true"]:not(:has(> [data-wa-rail-seam-host="true"])) [data-wa-side-column="true"] {
+    border-right: 1px solid var(--border-list, rgba(134, 150, 160, 0.22)) !important;
+}
+
+/* Host nativo de bordes divisorios verticales en Chats (CH[2]):
+   CH[2] conserva su posicion/tamano nativos (left: 0; width: 100%; z-index: auto; pointer-events: none).
+   Su primer hijo (.xevlxbw, z-index: 300) dibuja el borde izquierdo junto al rail (64px normal / 42px compacto)
+   y al igualar su ancho al de #side, su segundo hijo (z-index: 200) dibuja el borde derecho nativo junto a #main. */
+[data-wa-rail-seam-host="true"] {
+    pointer-events: none !important;
+}
+
+[data-wa-rail-seam-host="true"] > div:first-child {
+    width: var(--wa-sidebar-width) !important;
+    min-width: var(--wa-sidebar-width) !important;
+    max-width: var(--wa-sidebar-width) !important;
+    flex: 0 0 var(--wa-sidebar-width) !important;
+    flex-basis: var(--wa-sidebar-width) !important;
+    pointer-events: none !important;
+}
+
+[data-wa-rail-seam-host="true"] > div:nth-child(2) {
+    flex: 1 1 0% !important;
+    min-width: 0 !important;
+}
+
+[data-wa-rail-seam-host="true"]:not([data-wa-drawer-middle-active="true"]) > div:nth-child(2) {
+    pointer-events: none !important;
+}
+
+[data-wa-rail-seam-host="true"][data-wa-drawer-middle-active="true"] > div:nth-child(2) {
+    pointer-events: auto !important;
+}
+
+/* Transicion permanente del ancho del rail izquierdo y elevacion z-index para que #side y Tab Shells no recorten contadores */
+[data-wa-nav-rail="true"] {
+    position: relative !important;
+    z-index: 500 !important;
+    overflow: visible !important;
+}
+
+html:not(.wa-resizing-active) [data-wa-nav-rail="true"] {
+    transition: width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                min-width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                max-width 180ms cubic-bezier(0.22, 1, 0.36, 1),
+                flex-basis 180ms cubic-bezier(0.22, 1, 0.36, 1) !important;
+    box-sizing: border-box !important;
+}
+
+/* Linea vertical residual: capas hermanas (drawers/overlays cerrados o sin contenido real)
+   del contenedor flex, incluso cuando .three esta presente (preservando el host nativo de borde del rail). */
+[data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not([data-wa-left-drawer="true"]):not([data-wa-right-column="true"]):not([data-wa-rail-seam-host="true"]):not(header):not(:has(header)):not(:has([role="alert"], [role="status"], [data-testid*="toast"], [data-animate-toast])) {
+    border-right: none !important;
+    border-left: none !important;
+    box-shadow: none !important;
+}
+
+[data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not([data-wa-left-drawer="true"]):not([data-wa-right-column="true"]):not([data-wa-rail-seam-host="true"]):not(header)::before,
+[data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not([data-wa-left-drawer="true"]):not([data-wa-right-column="true"]):not([data-wa-rail-seam-host="true"]):not(header)::after,
+[data-wa-flex-container="true"]::before,
+[data-wa-flex-container="true"]::after {
+    border: none !important;
+    box-shadow: none !important;
+}
+
+[data-wa-flex-container="true"] > [data-wa-aux-empty="true"] {
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    flex: 0 0 0px !important;
+    border: none !important;
+    box-shadow: none !important;
+    overflow: hidden !important;
+}
+
+[data-wa-flex-container="true"] > *:not([data-wa-main-column="true"]):not([data-wa-side-column="true"]):not([data-wa-left-drawer="true"]):not([data-wa-right-column="true"]):empty {
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    flex: 0 0 0px !important;
+    border: none !important;
+    display: none !important;
+}

@@ -6,6 +6,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QKeySequence>
+#include <QStringList>
 #include <QWebEngineScript>
 #include <QWebEngineScriptCollection>
 
@@ -17,6 +18,20 @@ QString loadWebAsset(const QString &resourcePath) {
         return {};
     }
     return QString::fromUtf8(file.readAll());
+}
+
+QString loadConcatenatedWebAssets(const QStringList &resourcePaths, const QString &separator) {
+    QString combined;
+    for (const QString &path : resourcePaths) {
+        const QString chunk = loadWebAsset(path);
+        if (!chunk.isEmpty()) {
+            if (!combined.isEmpty()) {
+                combined.append(separator);
+            }
+            combined.append(chunk);
+        }
+    }
+    return combined;
 }
 
 QString toJsStringLiteral(const QString &value) {
@@ -59,7 +74,12 @@ QString WhatsAppClient::getReadReceiptBlockerJs() const {
 QString WhatsAppClient::getSidebarEnhancementsJs() const {
     static const QString script = []() {
         QString js = loadWebAsset(QStringLiteral(":/web/sidebar_enhancements.js"));
-        const QString css = loadWebAsset(QStringLiteral(":/web/sidebar_enhancements.css"));
+        const QString css = loadConcatenatedWebAssets({
+            QStringLiteral(":/web/styles/theme_accents.css"),
+            QStringLiteral(":/web/styles/layout_columns.css"),
+            QStringLiteral(":/web/styles/resizers_overlays.css"),
+            QStringLiteral(":/web/styles/compact_mode.css"),
+        }, QStringLiteral("\n\n"));
         js.replace(QStringLiteral("__WA_SIDEBAR_CSS__"), toJsStringLiteral(css));
         return js;
     }();

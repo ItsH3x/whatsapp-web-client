@@ -1,0 +1,96 @@
+/* Modulo CSS 3/4: resizers_overlays.css
+ * Responsabilidad: variables y estilos de los divisores arrastrables (#wa-custom-resizer,
+ * #wa-custom-right-resizer), estado de arrastre global (html.wa-resizing-active) y apilamiento
+ * z-index de overlays, pickers, modales, dialogos, menus y toasts nativos.
+ * Dependencias: consume --wa-dynamic-accent de theme_accents.css.
+ */
+
+:root {
+    --wa-resizer-hitbox-width: 8px;
+    --wa-resizer-line-width: 2px;
+    --wa-resizer-color-hover: var(--wa-dynamic-accent, #00a884);
+    --wa-resizer-color-default: rgba(134, 150, 160, 0.25);
+}
+
+/* Divisores / Splitters (lateral izquierdo y panel derecho) */
+#wa-custom-resizer,
+#wa-custom-right-resizer {
+    position: fixed !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    width: var(--wa-resizer-hitbox-width) !important;
+    margin-left: calc(var(--wa-resizer-hitbox-width) / -2) !important;
+    cursor: col-resize !important;
+    z-index: 1000 !important;
+    background-color: transparent !important;
+    user-select: none !important;
+    -webkit-user-select: none !important;
+    -moz-user-select: none !important;
+    touch-action: none !important;
+    display: none;
+}
+
+#wa-custom-resizer.is-resizing,
+#wa-custom-right-resizer.is-resizing {
+    z-index: 99999 !important;
+}
+
+#wa-custom-resizer::after,
+#wa-custom-right-resizer::after {
+    content: '' !important;
+    position: absolute !important;
+    top: 0 !important;
+    bottom: 0 !important;
+    left: calc(50% - (var(--wa-resizer-line-width) / 2)) !important;
+    width: var(--wa-resizer-line-width) !important;
+    background-color: transparent !important;
+    transition: background-color 0.15s ease-in-out !important;
+    pointer-events: none !important;
+    user-select: none !important;
+    -webkit-user-select: none !important;
+}
+
+#wa-custom-resizer:hover::after,
+#wa-custom-resizer.is-resizing::after,
+#wa-custom-right-resizer:hover::after,
+#wa-custom-right-resizer.is-resizing::after {
+    background-color: var(--wa-resizer-color-hover) !important;
+}
+
+#wa-custom-resizer.wa-resizer-disabled,
+#wa-custom-right-resizer.wa-resizer-disabled {
+    pointer-events: none !important;
+    visibility: hidden !important;
+    cursor: default !important;
+    user-select: none !important;
+    -webkit-user-select: none !important;
+}
+
+#wa-custom-resizer.wa-resizer-disabled::after,
+#wa-custom-right-resizer.wa-resizer-disabled::after {
+    background-color: transparent !important;
+}
+
+html.wa-resizing-active,
+html.wa-resizing-active * {
+    cursor: col-resize !important;
+    user-select: none !important;
+    -webkit-user-select: none !important;
+    transition: none !important;
+}
+
+/* Elevacion z-index de overlays, pickers, modales, menus y alertas sobre los resizers */
+[data-animate-picker="true"],
+[data-animate-modal-popup="true"],
+[data-animate-modal-backdrop="true"],
+[data-animate-modal-media="true"],
+[data-animate-dropdown-item="true"],
+[data-testid*="media-viewer"],
+[role="dialog"]:not([data-wa-right-column="true"]):not([data-wa-right-column="true"] *):not([data-wa-left-drawer="true"]):not([data-wa-left-drawer="true"] *):not([data-wa-tab-shell="true"]):not([data-wa-tab-shell="true"] *),
+[role="menu"]:not([data-wa-right-column="true"] *):not([data-wa-tab-shell="true"] *),
+[role="alert"],
+[role="status"],
+[data-testid*="toast"],
+[data-animate-toast] {
+    z-index: 2000 !important;
+}
